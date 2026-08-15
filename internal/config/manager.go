@@ -58,12 +58,15 @@ func (m *Manager) Reload() error {
 }
 
 // Watch 启动后台轮询（默认间隔 1s），文件内容变化时自动 Reload，直到 ctx 取消。
+// 初始 hash 在调用时同步读取：保证 Watch 返回后、goroutine 启动前写入的文件
+// 一定会被后续轮询检测到（否则存在"goroutine 启动前文件已变，初始 hash 直接
+// 等于新内容，永不触发"的竞态）。
 func (m *Manager) Watch(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Second
 	}
+	lastHash := fileHash(m.path)
 	go func() {
-		lastHash := fileHash(m.path)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
