@@ -72,6 +72,20 @@ th{color:var(--muted);font-weight:500}
 var $ = function (s) { return document.querySelector(s); };
 var money = function (v) { return "$" + Number(v).toFixed(2); };
 var pctText = function (v) { return v == null ? "不限" : Number(v).toFixed(2) + "%"; };
+var fmtTime = function (iso) {
+  if (!iso) { return ""; }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return iso; }
+  var p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+};
+var fmtTime = function (iso) {
+  if (!iso) { return ""; }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return iso; }
+  var p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+};
 
 function makeCard(title, rows) {
   var card = document.createElement("div");
@@ -114,7 +128,7 @@ function userWindowCard(label, w) {
     rows.bar = p;
     rows.barCls = p >= 90 ? "danger" : p >= 70 ? "warn" : "ok";
   }
-  if (w.resets_at) { rows.pctText += " · 重置 " + w.resets_at; }
+  if (w.resets_at) { rows.pctText += " · 重置 " + fmtTime(w.resets_at); }
   return makeCard(label, rows);
 }
 
@@ -127,7 +141,7 @@ function poolCard(label, c) {
   st.style.color = "var(--muted)";
   st.textContent = " / " + (c.status || "-");
   num.appendChild(st);
-  var rows = { numNode: num, pctText: c.resets_at ? "重置 " + c.resets_at : "同步中…" };
+  var rows = { numNode: num, pctText: c.resets_at ? "重置 " + fmtTime(c.resets_at) : "同步中…" };
   if (c.percent != null) {
     var p = Math.min(100, Number(c.percent));
     rows.bar = p;
@@ -222,4 +236,3 @@ document.querySelectorAll(".tab").forEach(function (t) {
 </script>
 </body>
 </html>
-

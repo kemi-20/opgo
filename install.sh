@@ -4,8 +4,8 @@
 set -euo pipefail
 
 REPO="${OPGO_REPO:-kemi-20/opgo}"
-BIN="/usr/local/bin/opgo"
 OPGO_DIR="/opt/opgo"
+BIN="$OPGO_DIR/opgo"
 SERVICE="opgo.service"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -37,6 +37,7 @@ fi
 curl -fsSL -o "${BIN}.tmp" "$ASSET_URL"
 chmod +x "${BIN}.tmp"
 mv "${BIN}.tmp" "$BIN"
+chown opgo:opgo "$BIN"
 
 echo "==> 写入 systemd 服务"
 cat > "/etc/systemd/system/${SERVICE}" <<'UNIT'
@@ -49,7 +50,7 @@ Wants=network-online.target
 Type=simple
 User=opgo
 Group=opgo
-ExecStart=/usr/local/bin/opgo
+ExecStart=/opt/opgo/opgo
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
