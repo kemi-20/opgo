@@ -6,3 +6,4 @@ dist/
 *.exe
 *.exe~
 .tmp/
+scripts/
