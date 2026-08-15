@@ -33,8 +33,8 @@ func testConfigJSON(upstream string) string {
 		"rate_limit_per_minute": 0,
 		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 		"pricing": {
-			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0},
-			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0}
+			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -350,7 +350,8 @@ func TestModelsList(t *testing.T) {
 	}
 	var obj struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			ContextLength int64  `json:"context_length"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
@@ -358,6 +359,11 @@ func TestModelsList(t *testing.T) {
 	}
 	if len(obj.Data) != 2 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "mimo-v2.5" {
 		t.Errorf("models = %+v", obj.Data)
+	}
+	for i, m := range obj.Data {
+		if m.ContextLength != 1048576 {
+			t.Errorf("models[%d] context_length = %d，应 1048576", i, m.ContextLength)
+		}
 	}
 	if status, _, _ := doReq(t, srv, "GET", "/v1/models", "", ""); status != 401 {
 		t.Errorf("未认证 status = %d", status)
@@ -612,5 +618,38 @@ func TestNoKeyLeak(t *testing.T) {
 		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 			t.Errorf("%s Content-Type = %q", p.path, ct)
 		}
+	}
+}
+
+func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
+	up := newFakeServer(&fakeUpstream{})
+	defer up.Close()
+	// 清除所有模型的 context_length，模拟 config 未定义
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		for name, pr := range c.Pricing {
+			pr.ContextLength = 0
+			c.Pricing[name] = pr
+		}
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	status, body, _ := doReq(t, srv, "GET", "/v1/models", testUser1, "")
+	if status != 200 {
+		t.Fatalf("status = %d", status)
+	}
+	if strings.Contains(body, "context_length") {
+		t.Errorf("未配置 context_length 时 /models 不应包含该字段，body = %s", body)
+	}
+	var obj struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if len(obj.Data) != 2 {
+		t.Errorf("models = %+v", obj.Data)
 	}
 }

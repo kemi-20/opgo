@@ -14,14 +14,26 @@ import (
 	"time"
 )
 
-// ModelPricing 每个模型的每百万 token 价格（美元）。
+// ModelPricing 每个模型的每百万 token 价格（美元）与上下文长度。
 type ModelPricing struct {
 	InputPerMillion       float64 `json:"input_per_million"`
 	OutputPerMillion      float64 `json:"output_per_million"`
 	CachedReadPerMillion  float64 `json:"cached_read_per_million"`
 	CachedWritePerMillion float64 `json:"cached_write_per_million"`
+	// ContextLength 上下文长度（token）；<=0 视为未设置，/models 不输出该字段。
+	ContextLength int64 `json:"context_length"`
 }
 
+// HasContextLength 是否配置了上下文长度。
+func (p ModelPricing) HasContextLength() bool { return p.ContextLength > 0 }
+
+// RawPrice 每个模型的每百万 token 价格的原始 JSON 文本（保留 config 原版精度）。
+type RawPrice struct {
+	InputPerMillion       string `json:"input_per_million"`
+	OutputPerMillion      string `json:"output_per_million"`
+	CachedReadPerMillion  string `json:"cached_read_per_million"`
+	CachedWritePerMillion string `json:"cached_write_per_million"`
+}
 // User 一个共享用户；同 uuid 多个 key 共享同一额度。
 type User struct {
 	UUID   string             `json:"uuid"`
@@ -59,6 +71,7 @@ type Config struct {
 	keyIndex   map[string]*User
 	userIndex  map[string]*User
 	modelOrder []string
+	rawPricing map[string]RawPrice
 }
 
 func DefaultConfigPath() string {
@@ -114,6 +127,7 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("配置不是合法 JSON: %w", err)
 	}
 	c.modelOrder = objectKeyOrder(data, "pricing")
+	c.rawPricing = objectRawPricing(data)
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -213,6 +227,23 @@ func (c *Config) Price(model string) (ModelPricing, bool) {
 	return p, ok
 }
 
+
+// RawModelPrice 模型与其原始价格的展示条目（按 config 书写顺序）。
+type RawModelPrice struct {
+	Model string   `json:"model"`
+	Price RawPrice `json:"price"`
+}
+
+// RawPricing 返回每个模型价格的原始 JSON 文本（保留 config 书写精度与顺序），供前端展示。
+func (c *Config) RawPricing() []RawModelPrice {
+	out := make([]RawModelPrice, 0, len(c.modelOrder))
+	for _, name := range c.modelOrder {
+		if rp, ok := c.rawPricing[name]; ok {
+			out = append(out, RawModelPrice{Model: name, Price: rp})
+		}
+	}
+	return out
+}
 // ModelNames 返回 pricing 的书写顺序。
 func (c *Config) ModelNames() []string { return c.modelOrder }
 
@@ -249,6 +280,65 @@ func objectKeyOrder(data []byte, key string) []string {
 		out = append(out, ks)
 		var v json.RawMessage
 		_ = dec.Decode(&v)
+	}
+	return out
+}
+
+// objectRawPricing 提取 pricing 对象中每个数值字段的原始 JSON 文本。
+// 使用 json.Decoder 保持数字书写精度（如 0.0028 不被 float64 舍入）。
+func objectRawPricing(data []byte) map[string]RawPrice {
+	out := make(map[string]RawPrice)
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return out
+	}
+	raw, ok := root["pricing"]
+	if !ok {
+		return out
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return out
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			break
+		}
+		ks, _ := k.(string)
+		var obj json.RawMessage
+		if err := dec.Decode(&obj); err != nil {
+			continue
+		}
+		od := json.NewDecoder(bytes.NewReader(obj))
+		if tok, err := od.Token(); err != nil || tok != json.Delim('{') {
+			continue
+		}
+		rp := RawPrice{}
+		for od.More() {
+			field, err := od.Token()
+			if err != nil {
+				break
+			}
+			fs, _ := field.(string)
+			var val json.RawMessage
+			if err := od.Decode(&val); err != nil {
+				continue
+			}
+			s := strings.TrimSpace(string(val))
+			switch fs {
+			case "input_per_million":
+				rp.InputPerMillion = s
+			case "output_per_million":
+				rp.OutputPerMillion = s
+			case "cached_read_per_million":
+				rp.CachedReadPerMillion = s
+			case "cached_write_per_million":
+				rp.CachedWritePerMillion = s
+			}
+		}
+		out[ks] = rp
 	}
 	return out
 }

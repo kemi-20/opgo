@@ -28,6 +28,13 @@ fi
 mkdir -p "$OPGO_DIR"
 chown opgo:opgo "$OPGO_DIR"
 
+echo "==> 检查已有配置"
+if [ -f "$OPGO_DIR/config.json" ]; then
+  echo "    检测到 $OPGO_DIR/config.json，升级将保留原有配置（不会覆盖），无需重新配置。"
+else
+  echo "    未检测到配置，首次启动时程序会自动生成示例配置 $OPGO_DIR/config.json。"
+fi
+
 echo "==> 下载最新 release"
 ASSET_URL="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.assets[] | select(.name=="opgo-linux-amd64") | .browser_download_url')"
 if [ -z "$ASSET_URL" ]; then

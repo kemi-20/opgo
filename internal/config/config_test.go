@@ -17,8 +17,8 @@ const exampleJSON = `{
 	"rate_limit_per_minute": 60,
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
-		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0},
-		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0}
+		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
 	},
 	"users": [
 		{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-u1", "sk-u1b"]},
@@ -49,6 +49,10 @@ func TestParseExample(t *testing.T) {
 	}
 	if _, ok := c.Price("nope"); ok {
 		t.Error("nope 不应有价格")
+	}
+	dp, _ := c.Price("deepseek-v4-flash")
+	if !dp.HasContextLength() || dp.ContextLength != 1048576 {
+		t.Errorf("deepseek-v4-flash context_length = %d，应默认 1048576", dp.ContextLength)
 	}
 	u := c.UserByKey("sk-u1b")
 	if u == nil || u.UUID != "uuid-1" {
@@ -155,5 +159,52 @@ func TestNoLegacyFields(t *testing.T) {
 func TestNoVendorStringInExample(t *testing.T) {
 	if strings.Contains(strings.ToLower(exampleJSON), "opencode") {
 		t.Error("示例配置不应包含供应商字样")
+	}
+}
+
+func TestRawPricingPreservesPrecision(t *testing.T) {
+	c, err := Parse([]byte(exampleJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := c.RawPricing()
+	if len(list) != 2 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "mimo-v2.5" {
+		t.Fatalf("RawPricing 顺序 = %+v，应保持 config 书写顺序", list)
+	}
+	p := list[0].Price
+	if p.InputPerMillion != "0.14" {
+		t.Errorf("input raw = %q, want 0.14", p.InputPerMillion)
+	}
+	if p.OutputPerMillion != "0.28" {
+		t.Errorf("output raw = %q, want 0.28", p.OutputPerMillion)
+	}
+	if p.CachedReadPerMillion != "0.0028" {
+		t.Errorf("cached read raw = %q, want 0.0028", p.CachedReadPerMillion)
+	}
+	if p.CachedWritePerMillion != "0" {
+		t.Errorf("cached write raw = %q, want 0", p.CachedWritePerMillion)
+	}
+	// 修改返回的切片不应影响原配置（副本语义）
+	list[0].Price.InputPerMillion = "999"
+	if got := c.RawPricing()[0].Price.InputPerMillion; got != "0.14" {
+		t.Errorf("RawPricing 应返回副本，got %q", got)
+	}
+}
+
+func TestContextLengthOptional(t *testing.T) {
+	// 不写 context_length 时视为未设置，HasContextLength 为 false
+	cfg := strings.Replace(exampleJSON, ", \"context_length\": 1048576", "", -1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"deepseek-v4-flash", "mimo-v2.5"} {
+		p, ok := c.Price(name)
+		if !ok {
+			t.Fatalf("%s 应有价格", name)
+		}
+		if p.HasContextLength() {
+			t.Errorf("%s 未配置 context_length 时应视为空", name)
+		}
 	}
 }

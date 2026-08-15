@@ -59,7 +59,7 @@ go build -o opgo.exe .
 | balance_interval_seconds | 余量同步间隔，默认 120 |
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
-| pricing | 模型单价（每百万 token） |
+| pricing | 模型单价（每百万 token）+ context_length（上下文长度，可省略） |
 | users | uuid + 备注（可空）+ key 列表 |
 
 ## 计费与限额

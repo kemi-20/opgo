@@ -142,7 +142,11 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, len(p.cfg.ModelNames()))
 	for _, name := range p.cfg.ModelNames() {
-		data = append(data, map[string]any{"id": name, "object": "model", "created": created, "owned_by": "config"})
+		item := map[string]any{"id": name, "object": "model", "created": created, "owned_by": "config"}
+		if pr, ok := p.cfg.Price(name); ok && pr.HasContextLength() {
+			item["context_length"] = pr.ContextLength
+		}
+		data = append(data, item)
 	}
 	p.writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -374,6 +378,7 @@ func (p *Proxy) apiUsage(w http.ResponseWriter, r *http.Request) {
 		"snapshot_at": snapshotAt(snap, synced),
 		"windows":     p.windowsReport(u.UUID, p.cfg.EffectiveLimits(u), snap, synced, now),
 		"total":       p.totalReport(snap, synced),
+		"pricing":     p.cfg.RawPricing(),
 	})
 }
 
@@ -405,6 +410,7 @@ func (p *Proxy) apiAdmin(w http.ResponseWriter, r *http.Request) {
 		"snapshot_at": snapshotAt(snap, synced),
 		"total":       p.totalReport(snap, synced),
 		"users":       users,
+		"pricing":     p.cfg.RawPricing(),
 	})
 }
 

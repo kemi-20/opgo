@@ -54,6 +54,7 @@ th{color:var(--muted);font-weight:500}
 <div class="meta">UUID：<span id="u-uuid"></span><span id="u-sync" class="sync"></span></div>
 <div class="grid" id="u-grid"></div>
 <div class="sect"><h2>总池（套餐实时余量）</h2><div class="grid" id="u-total"></div></div>
+<div class="sect"><h2>模型定价</h2><div id="u-pricing"></div></div>
 </div>
 </div>
 
@@ -63,6 +64,7 @@ th{color:var(--muted);font-weight:500}
 <div id="a-result" style="display:none">
 <div class="sect"><h2>总池（套餐实时余量）</h2><div class="grid" id="a-total"></div></div>
 <div class="sect"><h2>全部用户</h2><table id="a-table"><thead><tr><th>UUID</th><th>备注</th><th>5小时</th><th>一周</th><th>31天</th></tr></thead><tbody></tbody></table></div>
+<div class="sect"><h2>模型定价</h2><div id="a-pricing"></div></div>
 </div>
 </div>
 </div>
@@ -70,15 +72,13 @@ th{color:var(--muted);font-weight:500}
 <script>
 "use strict";
 var $ = function (s) { return document.querySelector(s); };
-var money = function (v) { return "$" + Number(v).toFixed(2); };
-var pctText = function (v) { return v == null ? "不限" : Number(v).toFixed(2) + "%"; };
-var fmtTime = function (iso) {
-  if (!iso) { return ""; }
-  var d = new Date(iso);
-  if (isNaN(d.getTime())) { return iso; }
-  var p = function (n) { return (n < 10 ? "0" : "") + n; };
-  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+var money = function (v) {
+  var n = Number(v);
+  if (isNaN(n) || !isFinite(n)) { return "$0.00"; }
+  var r = (n > 0 && n < 0.005) ? 0.01 : Math.round(n * 100) / 100;
+  return "$" + r.toFixed(2);
 };
+var pctText = function (v) { return v == null ? "不限" : Number(v).toFixed(2) + "%"; };
 var fmtTime = function (iso) {
   if (!iso) { return ""; }
   var d = new Date(iso);
@@ -159,6 +159,41 @@ function fillWindows(container, windows, kind) {
   });
 }
 
+
+function fillPricing(container, pricing) {
+  container.textContent = "";
+  if (!pricing || !pricing.length) { return; }
+  var note = document.createElement("div");
+  note.className = "sub";
+  note.textContent = "价格为每百万 token（config 原版精度）";
+  container.appendChild(note);
+  var table = document.createElement("table");
+  var thead = document.createElement("thead");
+  var hr = document.createElement("tr");
+  ["模型", "输入 ($/1M)", "输出 ($/1M)", "缓存读取 ($/1M)", "缓存写入 ($/1M)"].forEach(function (h) {
+    var th = document.createElement("th");
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  var tb = document.createElement("tbody");
+  pricing.forEach(function (item) {
+    var p = item.price || {};
+    var tr = document.createElement("tr");
+    var tdName = document.createElement("td");
+    tdName.textContent = item.model || "";
+    tr.appendChild(tdName);
+    [p.input_per_million, p.output_per_million, p.cached_read_per_million, p.cached_write_per_million].forEach(function (v) {
+      var td = document.createElement("td");
+      td.textContent = (v == null || v === "") ? "—" : "$" + v;
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  container.appendChild(table);
+}
 function post(url, body) {
   return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
     .then(function (r) {
@@ -188,6 +223,7 @@ $("#u-btn").addEventListener("click", function () {
     syncNote(res.data);
     fillWindows($("#u-grid"), res.data.windows, "user");
     fillWindows($("#u-total"), res.data.total, "pool");
+    fillPricing($("#u-pricing"), res.data.pricing);
   }).catch(function (e) { showErr(err, "网络错误: " + e); }).finally(function () { $("#u-btn").disabled = false; });
 });
 
@@ -218,6 +254,7 @@ $("#a-btn").addEventListener("click", function () {
       });
       tb.appendChild(tr);
     });
+    fillPricing($("#a-pricing"), res.data.pricing);
   }).catch(function (e) { showErr(err, "网络错误: " + e); }).finally(function () { $("#a-btn").disabled = false; });
 });
 
