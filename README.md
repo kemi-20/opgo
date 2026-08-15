@@ -4,7 +4,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5 定价）
+- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 总池保护：以上游实时余量接口为准，额度用尽即 429
 - 流式请求照常计费（自动注入 include_usage，兼容 OpenAI / Anthropic 协议）

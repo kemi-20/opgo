@@ -27,9 +27,9 @@
       "context_length": 1048576
     },
     "deepseek-v4-pro": {
-      "input_per_million": 0.56,
-      "output_per_million": 1.12,
-      "cached_read_per_million": 0.0112,
+      "input_per_million": 1.74,
+      "output_per_million": 3.48,
+      "cached_read_per_million": 0.0145,
       "cached_write_per_million": 0,
       "context_length": 1048576
     },
@@ -38,6 +38,13 @@
       "output_per_million": 0.28,
       "cached_read_per_million": 0.0028,
       "cached_write_per_million": 0,
+      "context_length": 1048576
+    },
+    "gpt-5.6-luna": {
+      "input_per_million": 1.60,
+      "output_per_million": 7.20,
+      "cached_read_per_million": 0.16,
+      "cached_write_per_million": 2.00,
       "context_length": 1048576
     }
   },

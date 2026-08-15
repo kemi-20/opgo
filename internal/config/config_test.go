@@ -18,8 +18,9 @@ const exampleJSON = `{
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
 		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-		"deepseek-v4-pro": {"input_per_million": 0.56, "output_per_million": 1.12, "cached_read_per_million": 0.0112, "cached_write_per_million": 0, "context_length": 1048576},
-		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
+		"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1048576},
+		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1048576}
 	},
 	"users": [
 		{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-u1", "sk-u1b"]},
@@ -42,7 +43,7 @@ func TestParseExample(t *testing.T) {
 	if c.UpstreamBase != "https://PROVIDER_HOST/v1" {
 		t.Errorf("upstream = %q", c.UpstreamBase)
 	}
-	if got := c.ModelNames(); len(got) != 3 || got[0] != "deepseek-v4-flash" || got[1] != "deepseek-v4-pro" || got[2] != "mimo-v2.5" {
+	if got := c.ModelNames(); len(got) != 4 || got[0] != "deepseek-v4-flash" || got[1] != "deepseek-v4-pro" || got[2] != "mimo-v2.5" || got[3] != "gpt-5.6-luna" {
 		t.Errorf("model order = %v", got)
 	}
 	if _, ok := c.Price("mimo-v2.5"); !ok {
@@ -50,8 +51,13 @@ func TestParseExample(t *testing.T) {
 	}
 	if pp, ok := c.Price("deepseek-v4-pro"); !ok {
 		t.Error("deepseek-v4-pro 应有价格")
-	} else if pp.InputPerMillion != 0.56 || pp.OutputPerMillion != 1.12 || pp.CachedReadPerMillion != 0.0112 || pp.CachedWritePerMillion != 0 {
-		t.Errorf("deepseek-v4-pro 价格 = %+v，应为 flash 的 4 倍", pp)
+	} else if pp.InputPerMillion != 1.74 || pp.OutputPerMillion != 3.48 || pp.CachedReadPerMillion != 0.0145 || pp.CachedWritePerMillion != 0 {
+		t.Errorf("deepseek-v4-pro 价格 = %+v，应为官网价（0.435/0.87/0.003625）的 4 倍", pp)
+	}
+	if lp, ok := c.Price("gpt-5.6-luna"); !ok {
+		t.Error("gpt-5.6-luna 应有价格")
+	} else if lp.InputPerMillion != 1.60 || lp.OutputPerMillion != 7.20 || lp.CachedReadPerMillion != 0.16 || lp.CachedWritePerMillion != 2.00 {
+		t.Errorf("gpt-5.6-luna 价格 = %+v，应为官网>272k 档的 4 倍", lp)
 	}
 	if _, ok := c.Price("nope"); ok {
 		t.Error("nope 不应有价格")
@@ -174,7 +180,7 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := c.RawPricing()
-	if len(list) != 3 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "deepseek-v4-pro" || list[2].Model != "mimo-v2.5" {
+	if len(list) != 4 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "deepseek-v4-pro" || list[2].Model != "mimo-v2.5" || list[3].Model != "gpt-5.6-luna" {
 		t.Fatalf("RawPricing 顺序 = %+v，应保持 config 书写顺序", list)
 	}
 	p := list[0].Price
@@ -204,7 +210,7 @@ func TestContextLengthOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5"} {
+	for _, name := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "gpt-5.6-luna"} {
 		p, ok := c.Price(name)
 		if !ok {
 			t.Fatalf("%s 应有价格", name)

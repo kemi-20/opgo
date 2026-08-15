@@ -37,8 +37,9 @@ func testConfigJSON(upstream string) string {
 		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 		"pricing": {
 			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-			"deepseek-v4-pro": {"input_per_million": 0.56, "output_per_million": 1.12, "cached_read_per_million": 0.0112, "cached_write_per_million": 0, "context_length": 1048576},
-			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
+			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1048576},
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1048576}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -380,7 +381,7 @@ func TestModelsList(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 3 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" {
+	if len(obj.Data) != 4 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" {
 		t.Errorf("models = %+v", obj.Data)
 	}
 	for i, m := range obj.Data {
@@ -672,7 +673,7 @@ func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 3 {
+	if len(obj.Data) != 4 {
 		t.Errorf("models = %+v", obj.Data)
 	}
 }
