@@ -5,8 +5,7 @@ set -euo pipefail
 
 REPO="${OPGO_REPO:-kemi-20/opgo}"
 BIN="/usr/local/bin/opgo"
-ETC_DIR="/etc/opgo"
-DATA_DIR="/var/lib/opgo"
+OPGO_DIR="/opt/opgo"
 SERVICE="opgo.service"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -24,10 +23,10 @@ fi
 
 echo "==> 创建用户与目录"
 if ! id -u opgo >/dev/null 2>&1; then
-  useradd --system --no-create-home --home-dir "$DATA_DIR" opgo
+  useradd --system --no-create-home --home-dir "$OPGO_DIR" opgo
 fi
-mkdir -p "$ETC_DIR" "$DATA_DIR"
-chown opgo:opgo "$DATA_DIR"
+mkdir -p "$OPGO_DIR"
+chown opgo:opgo "$OPGO_DIR"
 
 echo "==> 下载最新 release"
 ASSET_URL="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.assets[] | select(.name=="opgo-linux-amd64") | .browser_download_url')"
@@ -66,7 +65,7 @@ RestrictAddressFamilies=AF_INET AF_INET6
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/opgo /etc/opgo
+ReadWritePaths=/opt/opgo
 
 [Install]
 WantedBy=multi-user.target
@@ -76,7 +75,7 @@ systemctl daemon-reload
 systemctl enable --now "$SERVICE"
 
 echo ""
-echo "安装完成。首次启动会自动生成示例配置 /etc/opgo/config.json，"
+echo "安装完成。首次启动会自动生成示例配置 /opt/opgo/config.json，"
 echo "请编辑该文件（upstream_base / master_key / admin_password / users）后执行："
 echo "  sudo systemctl restart opgo"
 echo "查看日志："

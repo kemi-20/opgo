@@ -19,7 +19,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 curl -fsSL https://raw.githubusercontent.com/kemi-20/opgo/main/install.sh | sudo bash
 ```
 
-首次启动会自动生成 /etc/opgo/config.json（示例配置），编辑后重启：
+首次启动会自动生成 /opt/opgo/config.json（示例配置），编辑后重启：
 
 ```bash
 sudo systemctl restart opgo
@@ -35,6 +35,17 @@ go build -o opgo.exe .
 ```
 
 首次运行会在当前目录自动生成 config.json，修改后重启。
+
+## 访问方式（客户端配置）
+
+客户端把 baseURL 指向 `http://<主机IP>:3003/v1`：
+
+- OpenAI SDK / openai-compatible：`baseURL: http://IP:3003/v1`，自动请求 `/v1/chat/completions`、`/v1/responses`
+- Anthropic SDK：`baseURL: http://IP:3003/v1`，自动请求 `/v1/messages`（x-api-key 填你的用户 key）
+- 模型列表：`GET http://IP:3003/v1/models`
+- 套餐余量（与上游官方格式一致）：`GET http://IP:3003/v1/usage`（Authorization: Bearer 你的用户 key）
+
+代理会自动剥离 `/v1` 前缀并转发到上游对应端点；`/v1/models` 与 `/v1/usage` 由本地提供（配置与实时快照），不经过上游。
 
 ## 配置说明
 
@@ -67,7 +78,7 @@ go build -o opgo.exe .
 ## 密钥自检
 
 ```bash
-opgo -audit -config /etc/opgo/config.json
+opgo -audit -config /opt/opgo/config.json
 ```
 
 全部 PASS 退出码为 0；任何响应中出现 key 都会 FAIL。
@@ -75,7 +86,7 @@ opgo -audit -config /etc/opgo/config.json
 ## 数据查询
 
 ```bash
-sqlite3 /var/lib/opgo/usage.db "select uuid, model, total_tokens, cost_units, datetime(created_at_epoch_ms/1000,'unixepoch') from usage order by id desc limit 20;"
+sqlite3 /opt/opgo/usage.db "select uuid, model, total_tokens, cost_units, datetime(created_at_epoch_ms/1000,'unixepoch') from usage order by id desc limit 20;"
 ```
 
 ## 发布

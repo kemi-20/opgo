@@ -78,9 +78,11 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 
 	var mu sync.Mutex
 	var gotAuth string
+	var gotPath string
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
 		mu.Unlock()
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -200,6 +202,43 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		}
 		return assertNoKeys("/v1/models", body, hdr)
 	})
+	check("v1/usage 官方格式无泄露", func() error {
+		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/usage", "Bearer "+userKey, "")
+		if status != 200 {
+			return fmt.Errorf("状态 %d: %s", status, body)
+		}
+		if err := assertNoKeys("/v1/usage", body, hdr); err != nil {
+			return err
+		}
+		var obj struct {
+			Usage struct {
+				Rolling map[string]any `json:"rolling"`
+				Weekly  map[string]any `json:"weekly"`
+				Monthly map[string]any `json:"monthly"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return fmt.Errorf("/v1/usage 响应不是 JSON: %w", err)
+		}
+		for name, c := range map[string]map[string]any{"rolling": obj.Usage.Rolling, "weekly": obj.Usage.Weekly, "monthly": obj.Usage.Monthly} {
+			if c == nil {
+				return fmt.Errorf("/v1/usage 缺少 %s", name)
+			}
+			for _, f := range []string{"status", "percent", "resetsAt"} {
+				if _, ok := c[f]; !ok {
+					return fmt.Errorf("/v1/usage %s 缺少字段 %s", name, f)
+				}
+			}
+		}
+		return nil
+	})
+	check("v1/usage 未认证 → 401 无泄露", func() error {
+		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/usage", "", "")
+		if status != 401 {
+			return fmt.Errorf("状态 %d", status)
+		}
+		return assertNoKeys("/v1/usage-401", body, hdr)
+	})
 	check("models 未认证 → 401 无泄露", func() error {
 		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/models", "", "")
 		if status != 401 {
@@ -207,9 +246,10 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		}
 		return assertNoKeys("/v1/models-401", body, hdr)
 	})
-	check("转发后假上游收到母 key（仅上游方向）", func() error {
+	check("转发后假上游收到母 key 且 /v1 前缀已剥离（仅上游方向）", func() error {
 		mu.Lock()
 		gotAuth = ""
+		gotPath = ""
 		mu.Unlock()
 		status, body, hdr := req(client, http.MethodPost, srv1.URL+"/v1/chat/completions", "Bearer "+userKey,
 			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
@@ -221,9 +261,13 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		}
 		mu.Lock()
 		a := gotAuth
+		pa := gotPath
 		mu.Unlock()
 		if a != "Bearer "+cfg.MasterKey {
 			return fmt.Errorf("假上游收到 %q，期望 Bearer 母 key", a)
+		}
+		if pa != "/chat/completions" {
+			return fmt.Errorf("假上游收到路径 %q，期望 /chat/completions（/v1 前缀应被剥离）", pa)
 		}
 		return nil
 	})

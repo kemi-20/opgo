@@ -65,14 +65,14 @@ func DefaultConfigPath() string {
 	if runtime.GOOS == "windows" {
 		return "config.json"
 	}
-	return "/etc/opgo/config.json"
+	return "/opt/opgo/config.json"
 }
 
 func DefaultDBPath() string {
 	if runtime.GOOS == "windows" {
 		return "usage.db"
 	}
-	return "/var/lib/opgo/usage.db"
+	return "/opt/opgo/usage.db"
 }
 
 // Load 读取配置；文件不存在时用 example 自动创建并载入，同时在日志中提示修改。

@@ -64,6 +64,7 @@ func newTestProxy(t *testing.T, upstream string, bal BalanceSource, mutate func(
 type fakeUpstream struct {
 	mu       sync.Mutex
 	lastAuth string
+	lastPath string
 	lastBody []byte
 	stream   bool
 	status   int
@@ -73,6 +74,7 @@ func (f *fakeUpstream) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.lastAuth = r.Header.Get("Authorization")
+		f.lastPath = r.URL.Path
 		f.lastBody, _ = io.ReadAll(r.Body)
 		st := f.status
 		if st == 0 {
@@ -100,6 +102,12 @@ func (f *fakeUpstream) auth() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastAuth
+}
+
+func (f *fakeUpstream) path() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastPath
 }
 
 type fixedBalance struct{ snap *balance.Snapshot }
@@ -436,6 +444,74 @@ func TestAPIAdmin(t *testing.T) {
 	}
 }
 
+func TestV1PathRewrite(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	status, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody)
+	if status != 200 {
+		t.Fatalf("status = %d: %s", status, body)
+	}
+	if got := fu.path(); got != "/chat/completions" {
+		t.Errorf("上游收到路径 %q，期望 /chat/completions", got)
+	}
+	// 无 /v1 前缀的路径原样透传
+	doReq(t, srv, "POST", "/messages", testUser1, chatBody)
+	if got := fu.path(); got != "/messages" {
+		t.Errorf("上游收到路径 %q，期望 /messages", got)
+	}
+}
+
+func TestUsageEndpoint(t *testing.T) {
+	up := newFakeServer(&fakeUpstream{})
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	status, body, _ := doReq(t, srv, "GET", "/v1/usage", testUser1, "")
+	if status != 200 {
+		t.Fatalf("status = %d: %s", status, body)
+	}
+	var obj struct {
+		Usage struct {
+			Rolling map[string]any `json:"rolling"`
+			Weekly  map[string]any `json:"weekly"`
+			Monthly map[string]any `json:"monthly"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]map[string]any{"rolling": obj.Usage.Rolling, "weekly": obj.Usage.Weekly, "monthly": obj.Usage.Monthly} {
+		if c == nil {
+			t.Fatalf("缺少 %s", name)
+		}
+		for _, f := range []string{"status", "percent", "resetsAt"} {
+			if _, ok := c[f]; !ok {
+				t.Errorf("%s 缺少字段 %s", name, f)
+			}
+		}
+	}
+	if _, ok := obj.Usage.Rolling["resets_at"]; ok {
+		t.Error("不应出现 resets_at（官方字段名是 resetsAt）")
+	}
+	if status, _, _ := doReq(t, srv, "GET", "/v1/usage", "", ""); status != 401 {
+		t.Errorf("未认证 status = %d", status)
+	}
+	// 余额未同步 → 503
+	p2, _ := newTestProxy(t, up.URL, &noBalance{}, nil)
+	srv2 := httptest.NewServer(p2)
+	defer srv2.Close()
+	if status, _, _ := doReq(t, srv2, "GET", "/v1/usage", testUser1, ""); status != 503 {
+		t.Errorf("未同步 status = %d", status)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	up := newFakeServer(&fakeUpstream{})
 	defer up.Close()
@@ -503,6 +579,10 @@ func TestNoKeyLeak(t *testing.T) {
 	do("models", b, h)
 	_, b, h = doReq(t, s1, "GET", "/v1/models", "", "")
 	do("models-401", b, h)
+	_, b, h = doReq(t, s1, "GET", "/v1/usage", testUser1, "")
+	do("v1/usage", b, h)
+	_, b, h = doReq(t, s1, "GET", "/v1/usage", "", "")
+	do("v1/usage-401", b, h)
 	_, b, h = doReq(t, s1, "POST", "/v1/chat/completions", testUser1, chatBody)
 	do("forward", b, h)
 	_, b, h = doReq(t, s1, "POST", "/v1/chat/completions", testUser1, "{\"model\":\"unknown-model\",\"messages\":[]}")

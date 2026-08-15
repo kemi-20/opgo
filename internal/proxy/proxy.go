@@ -75,11 +75,40 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.apiUsage(w, r)
 	case path == "/api/admin" && r.Method == http.MethodPost:
 		p.apiAdmin(w, r)
+	case path == "/v1/usage" && r.Method == http.MethodGet:
+		p.serveUsage(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/models"):
 		p.serveModels(w, r)
 	default:
 		p.forward(w, r)
 	}
+}
+
+// serveUsage 以官方一致格式返回套餐余量（数据来自服务端缓存快照，不携带任何 key）。
+func (p *Proxy) serveUsage(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := p.authUser(r); !ok {
+		p.writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "无效的 key"})
+		return
+	}
+	snap, synced := p.balance.Snapshot()
+	if !synced {
+		p.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "套餐余量尚未同步，请稍后再试"})
+		return
+	}
+	capJSON := func(c balance.CapInfo) map[string]any {
+		return map[string]any{
+			"status":   c.Status,
+			"percent":  c.Percent,
+			"resetsAt": c.ResetsAt.Format(time.RFC3339Nano),
+		}
+	}
+	p.writeJSON(w, http.StatusOK, map[string]any{
+		"usage": map[string]any{
+			"rolling": capJSON(snap.Rolling),
+			"weekly":  capJSON(snap.Weekly),
+			"monthly": capJSON(snap.Monthly),
+		},
+	})
 }
 
 func (p *Proxy) serveIndex(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +197,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			body = nb
 		}
 	}
-	upstream := p.cfg.UpstreamBase + r.URL.Path
+	// 客户端可用标准 OpenAI 路径（/v1/chat/completions 等）：去掉 /v1 前缀后拼接到上游
+	upstream := p.cfg.UpstreamBase + stripV1Prefix(r.URL.Path)
 	if r.URL.RawQuery != "" {
 		upstream += "?" + r.URL.RawQuery
 	}
@@ -433,6 +463,14 @@ func (p *Proxy) writeOpenAIError(w http.ResponseWriter, status int, code, messag
 	p.writeJSON(w, status, map[string]any{
 		"error": map[string]any{"message": message, "type": "opgo_error", "code": code},
 	})
+}
+
+// stripV1Prefix 去掉路径开头的 /v1 前缀（仅当它是完整路径段）。
+func stripV1Prefix(path string) string {
+	if path == "/v1" || strings.HasPrefix(path, "/v1/") {
+		return strings.TrimPrefix(path, "/v1")
+	}
+	return path
 }
 
 func copyHeaders(dst, src http.Header) {

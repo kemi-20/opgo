@@ -23,7 +23,7 @@ RestrictAddressFamilies=AF_INET AF_INET6
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/opgo /etc/opgo
+ReadWritePaths=/opt/opgo
 
 [Install]
 WantedBy=multi-user.target
