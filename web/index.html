@@ -36,6 +36,9 @@ table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:500}
 .sync{color:var(--warn);font-size:12px;margin-left:8px}
+.badge{display:inline-block;margin-left:6px;padding:1px 9px;border-radius:999px;font-size:11px;vertical-align:middle;white-space:nowrap}
+.badge.green{background:rgba(46,204,113,.14);color:var(--ok);border:1px solid var(--ok)}
+.badge.orange{background:rgba(243,156,18,.14);color:var(--warn);border:1px solid var(--warn)}
 </style>
 </head>
 <body>
@@ -48,7 +51,7 @@ th{color:var(--muted);font-weight:500}
 </div>
 
 <div class="panel active" id="p-user">
-<div class="bar"><input id="u-key" type="password" placeholder="输入你的 key（sk-...）" autocomplete="off"><button id="u-btn">查询</button></div>
+<div class="bar"><input id="u-key" type="password" placeholder="输入你的 key（sk-...）" autocomplete="new-password" name="opgo-user-key" spellcheck="false"><button id="u-btn">查询</button></div>
 <div id="u-err" class="err"></div>
 <div id="u-result" style="display:none">
 <div class="meta">UUID：<span id="u-uuid"></span><span id="u-sync" class="sync"></span></div>
@@ -59,7 +62,7 @@ th{color:var(--muted);font-weight:500}
 </div>
 
 <div class="panel" id="p-admin">
-<div class="bar"><input id="a-pass" type="password" placeholder="管理员密码" autocomplete="off"><button id="a-btn">查询</button></div>
+<div class="bar"><input id="a-pass" type="password" placeholder="管理员密码" autocomplete="new-password" name="opgo-admin-pass" spellcheck="false"><button id="a-btn">查询</button></div>
 <div id="a-err" class="err"></div>
 <div id="a-result" style="display:none">
 <div class="sect"><h2>总池（套餐实时余量）</h2><div class="grid" id="a-total"></div></div>
@@ -86,6 +89,13 @@ var fmtTime = function (iso) {
   var p = function (n) { return (n < 10 ? "0" : "") + n; };
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
 };
+
+function badge(text, cls) {
+  var s = document.createElement("span");
+  s.className = "badge " + cls;
+  s.textContent = text;
+  return s;
+}
 
 function makeCard(title, rows) {
   var card = document.createElement("div");
@@ -122,6 +132,12 @@ function userWindowCard(label, w) {
   lim.style.color = "var(--muted)";
   lim.textContent = " / " + (w.limit > 0 ? money(w.limit) : "不限");
   num.appendChild(lim);
+  // 智能提额：绿色徽章显示真实提额后限额；未提额且已超原额度（100%~105% 缓冲）：橙色徽章
+  if (w.boosted && w.boost_limit > 0) {
+    num.appendChild(badge("智能提额至 " + money(w.boost_limit), "green"));
+  } else if (w.percent != null && Number(w.percent) >= 100) {
+    num.appendChild(badge("已超额", "orange"));
+  }
   var rows = { numNode: num, pctText: "已用 " + pctText(w.percent) };
   if (w.percent != null) {
     var p = Math.min(100, Number(w.percent));
@@ -206,7 +222,7 @@ function showErr(el, msg) { el.textContent = msg || ""; }
 function syncNote(data) {
   var el = $("#u-sync");
   if (!data.synced) { el.textContent = "（套餐余量同步中）"; }
-  else if (data.snapshot_at) { el.textContent = "（快照 " + data.snapshot_at + "）"; }
+  else if (data.snapshot_at) { el.textContent = "（快照 " + fmtTime(data.snapshot_at) + "）"; }
   else { el.textContent = ""; }
 }
 
@@ -250,6 +266,11 @@ $("#a-btn").addEventListener("click", function () {
         var w = (u.windows && u.windows[o[0]]) || {};
         var td = document.createElement("td");
         td.textContent = money(w.used) + " / " + (w.limit > 0 ? money(w.limit) : "不限") + "（" + pctText(w.percent) + "）";
+        if (w.boosted && w.boost_limit > 0) {
+          td.appendChild(badge("智能提额至 " + money(w.boost_limit), "green"));
+        } else if (w.percent != null && Number(w.percent) >= 100) {
+          td.appendChild(badge("已超额", "orange"));
+        }
         tr.appendChild(td);
       });
       tb.appendChild(tr);

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"opgo/internal/config"
 )
 
 // DefaultURL 余额接口默认地址（代码内置；config 留空即用此值）。
@@ -95,43 +97,36 @@ func Parse(body []byte) (Snapshot, error) {
 }
 
 // Syncer 周期性抓取余额并缓存快照（主 key 只在服务端内存与上游请求中使用）。
+// 配置通过 cfgSrc 动态读取：热更新 master_key / balance_url / 间隔后无需重启。
 type Syncer struct {
-	url      string
-	token    string
-	interval time.Duration
-	timeout  time.Duration
-	client   *http.Client
-	log      *slog.Logger
+	cfgSrc  func() *config.Config
+	timeout time.Duration
+	client  *http.Client
+	log     *slog.Logger
 
 	mu   sync.RWMutex
 	snap *Snapshot
 }
 
-func New(url, token string, interval, timeout time.Duration, log *slog.Logger) *Syncer {
-	if url == "" {
-		url = DefaultURL
-	}
-	if interval <= 0 {
-		interval = 120 * time.Second
-	}
+func New(cfgSrc func() *config.Config, timeout time.Duration, log *slog.Logger) *Syncer {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 	return &Syncer{
-		url: url, token: token, interval: interval, timeout: timeout, log: log,
+		cfgSrc: cfgSrc, timeout: timeout, log: log,
 		client: &http.Client{Timeout: timeout},
 	}
 }
 
-// Start 启动后台抓取（立即抓一次，之后按间隔）。
+// Start 启动后台抓取（立即抓一次，之后按配置间隔，间隔变更即时生效）。
 func (s *Syncer) Start(ctx context.Context) {
 	go func() {
 		s.fetch()
-		t := time.NewTicker(s.interval)
-		defer t.Stop()
 		for {
+			t := time.NewTimer(s.interval())
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
 			case <-t.C:
 				s.fetch()
@@ -140,15 +135,36 @@ func (s *Syncer) Start(ctx context.Context) {
 	}()
 }
 
+func (s *Syncer) interval() time.Duration {
+	sec := 120
+	if c := s.cfgSrc(); c != nil && c.BalanceIntervalSeconds > 0 {
+		sec = c.BalanceIntervalSeconds
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// current 返回当前生效的余额接口地址与主 key（热更新后即时取用）。
+func (s *Syncer) current() (url, token string) {
+	if c := s.cfgSrc(); c != nil {
+		url = c.BalanceURL
+		token = c.MasterKey
+	}
+	if url == "" {
+		url = DefaultURL
+	}
+	return url, token
+}
+
 func (s *Syncer) fetch() {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	url, token := s.current()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		s.log.Error("余额请求构建失败", "err", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 	resp, err := s.client.Do(req)
 	if err != nil {

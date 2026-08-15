@@ -27,8 +27,9 @@ type BalanceSource interface {
 }
 
 // Proxy 主 HTTP 处理器。
+// cfg 为可热更新的配置管理器：每次请求从 Get() 取当前快照，配置文件变更即时生效。
 type Proxy struct {
-	cfg       *config.Config
+	cfg       *config.Manager
 	db        *store.Store
 	indexHTML []byte
 	log       *slog.Logger
@@ -38,13 +39,15 @@ type Proxy struct {
 	mu        sync.Mutex
 	userLocks map[string]*sync.Mutex
 	rate      *rateLimiter
+	boost     *boostTracker
 }
 
-func New(cfg *config.Config, db *store.Store, indexHTML []byte, bal BalanceSource, log *slog.Logger) *Proxy {
+func New(cfg *config.Manager, db *store.Store, indexHTML []byte, bal BalanceSource, log *slog.Logger) *Proxy {
 	return &Proxy{
 		cfg: cfg, db: db, indexHTML: indexHTML, log: log, balance: bal,
 		userLocks: map[string]*sync.Mutex{},
 		rate:      newRateLimiter(),
+		boost:     newBoostTracker(),
 		transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -127,7 +130,7 @@ func (p *Proxy) authUser(r *http.Request) (*config.User, string, bool) {
 	if key == "" || len(key) > 512 {
 		return nil, "", false
 	}
-	u := p.cfg.UserByKey(key)
+	u := p.cfg.Get().UserByKey(key)
 	return u, key, u != nil
 }
 
@@ -140,10 +143,11 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 	if snap, synced := p.balance.Snapshot(); synced {
 		created = snap.Monthly.ResetsAt.Unix()
 	}
-	data := make([]map[string]any, 0, len(p.cfg.ModelNames()))
-	for _, name := range p.cfg.ModelNames() {
+	c := p.cfg.Get()
+	data := make([]map[string]any, 0, len(c.ModelNames()))
+	for _, name := range c.ModelNames() {
 		item := map[string]any{"id": name, "object": "model", "created": created, "owned_by": "config"}
-		if pr, ok := p.cfg.Price(name); ok && pr.HasContextLength() {
+		if pr, ok := c.Price(name); ok && pr.HasContextLength() {
 			item["context_length"] = pr.ContextLength
 		}
 		data = append(data, item)
@@ -158,7 +162,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "无效的 key")
 		return
 	}
-	if !p.rate.allow(user.UUID, p.cfg.RateLimitPerMinute, time.Now()) {
+	c := p.cfg.Get()
+	if !p.rate.allow(user.UUID, c.RateLimitPerMinute, time.Now()) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<20))
 		p.writeOpenAIError(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后再试")
 		return
@@ -171,7 +176,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	model := meter.RequestModel(body)
 	price, hasPrice := config.ModelPricing{}, false
 	if model != "" {
-		price, hasPrice = p.cfg.Price(model)
+		price, hasPrice = c.Price(model)
 		if !hasPrice {
 			p.writeOpenAIError(w, http.StatusForbidden, "model_not_allowed", fmt.Sprintf("模型 %s 未在配置中，无法计费", model))
 			return
@@ -202,7 +207,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 客户端可用标准 OpenAI 路径（/v1/chat/completions 等）：去掉 /v1 前缀后拼接到上游
-	upstream := p.cfg.UpstreamBase + stripV1Prefix(r.URL.Path)
+	upstream := c.UpstreamBase + stripV1Prefix(r.URL.Path)
 	if r.URL.RawQuery != "" {
 		upstream += "?" + r.URL.RawQuery
 	}
@@ -213,8 +218,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	}
 	copyHeaders(req.Header, r.Header)
 	req.Header.Del("Content-Length")
-	req.Header.Set("Authorization", "Bearer "+p.cfg.MasterKey)
-	req.Header.Set("x-api-key", p.cfg.MasterKey)
+	req.Header.Set("Authorization", "Bearer "+c.MasterKey)
+	req.Header.Set("x-api-key", c.MasterKey)
 	req.Header.Set("Accept-Encoding", "identity")
 	// 使用浏览器 UA，避免上游 CDN 按指纹拦截非浏览器客户端
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -308,16 +313,37 @@ func (p *Proxy) userLimitExceeded(u *config.User, snap *balance.Snapshot, now ti
 	mu := p.lockFor(u.UUID)
 	mu.Lock()
 	defer mu.Unlock()
-	limits := p.cfg.EffectiveLimits(u)
+	c := p.cfg.Get()
+	limits := c.EffectiveLimits(u)
+	// 第一遍：尝试智能提额（在 uuid 锁内串行执行）
 	for _, period := range config.Periods {
+		lim := limits[period.Name]
+		if lim <= 0 {
+			continue
+		}
 		start := snap.Cap(period.Name).WindowStart(period.Duration)
 		used, err := p.db.UserWindowSum(u.UUID, start.UnixMilli())
 		if err != nil {
 			p.log.Error("查询个人用量失败", "err", err)
 			continue
 		}
+		p.maybeBoostLocked(c, u.UUID, period.Name, limits, used, snap)
+	}
+	// 第二遍：按生效硬卡判定（未提额 = L×105%，提额后 = L×150%，105% 不叠加）
+	for _, period := range config.Periods {
 		lim := limits[period.Name]
-		if lim > 0 && used >= meter.USDToUnits(lim) {
+		if lim <= 0 {
+			continue
+		}
+		start := snap.Cap(period.Name).WindowStart(period.Duration)
+		used, err := p.db.UserWindowSum(u.UUID, start.UnixMilli())
+		if err != nil {
+			p.log.Error("查询个人用量失败", "err", err)
+			continue
+		}
+		boosted := p.boost.boosted(u.UUID, period.Name, snap.Cap(period.Name).ResetsAt.Unix())
+		hard := p.hardLimit(c, lim, boosted)
+		if used >= meter.USDToUnits(hard) {
 			return fmt.Sprintf("个人额度（%s）", period.Name), true
 		}
 	}
@@ -345,10 +371,12 @@ func (p *Proxy) lockFor(uuid string) *sync.Mutex {
 }
 
 type windowInfo struct {
-	Used     float64  `json:"used"`
-	Limit    float64  `json:"limit"`
-	Percent  *float64 `json:"percent"`
-	ResetsAt string   `json:"resets_at"`
+	Used       float64  `json:"used"`
+	Limit      float64  `json:"limit"` // 始终为 config 原版限额（前端按它显示百分比）
+	Percent    *float64 `json:"percent"`
+	ResetsAt   string   `json:"resets_at"`
+	Boosted    bool     `json:"boosted"`     // 本周期已智能提额
+	BoostLimit float64  `json:"boost_limit"` // 提额后的真实限额（未提额时为 0）
 }
 
 type capInfo struct {
@@ -365,7 +393,8 @@ func (p *Proxy) apiUsage(w http.ResponseWriter, r *http.Request) {
 		p.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体需要 {\"key\": \"...\"}"})
 		return
 	}
-	u := p.cfg.UserByKey(req.Key)
+	c := p.cfg.Get()
+	u := c.UserByKey(req.Key)
 	if u == nil {
 		p.writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "无效的 key"})
 		return
@@ -376,9 +405,9 @@ func (p *Proxy) apiUsage(w http.ResponseWriter, r *http.Request) {
 		"uuid":        u.UUID,
 		"synced":      synced,
 		"snapshot_at": snapshotAt(snap, synced),
-		"windows":     p.windowsReport(u.UUID, p.cfg.EffectiveLimits(u), snap, synced, now),
+		"windows":     p.windowsReport(u.UUID, c.EffectiveLimits(u), snap, synced, now),
 		"total":       p.totalReport(snap, synced),
-		"pricing":     p.cfg.RawPricing(),
+		"pricing":     c.RawPricing(),
 	})
 }
 
@@ -390,19 +419,20 @@ func (p *Proxy) apiAdmin(w http.ResponseWriter, r *http.Request) {
 		p.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体需要 {\"password\": \"...\"}"})
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(p.cfg.AdminPassword)) != 1 {
+	c := p.cfg.Get()
+	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(c.AdminPassword)) != 1 {
 		p.writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "密码错误"})
 		return
 	}
 	now := time.Now()
 	snap, synced := p.balance.Snapshot()
-	users := make([]map[string]any, 0, len(p.cfg.Users))
-	for i := range p.cfg.Users {
-		u := &p.cfg.Users[i]
+	users := make([]map[string]any, 0, len(c.Users))
+	for i := range c.Users {
+		u := &c.Users[i]
 		users = append(users, map[string]any{
 			"uuid":    u.UUID,
 			"remark":  u.Remark,
-			"windows": p.windowsReport(u.UUID, p.cfg.EffectiveLimits(u), snap, synced, now),
+			"windows": p.windowsReport(u.UUID, c.EffectiveLimits(u), snap, synced, now),
 		})
 	}
 	p.writeJSON(w, http.StatusOK, map[string]any{
@@ -410,7 +440,7 @@ func (p *Proxy) apiAdmin(w http.ResponseWriter, r *http.Request) {
 		"snapshot_at": snapshotAt(snap, synced),
 		"total":       p.totalReport(snap, synced),
 		"users":       users,
-		"pricing":     p.cfg.RawPricing(),
+		"pricing":     c.RawPricing(),
 	})
 }
 
@@ -422,21 +452,28 @@ func snapshotAt(snap *balance.Snapshot, synced bool) string {
 }
 
 func (p *Proxy) windowsReport(uuid string, limits map[string]float64, snap *balance.Snapshot, synced bool, now time.Time) map[string]windowInfo {
+	c := p.cfg.Get()
 	out := make(map[string]windowInfo, len(config.Periods))
 	for _, period := range config.Periods {
 		wi := windowInfo{Limit: limits[period.Name]}
 		if synced {
-			start := snap.Cap(period.Name).WindowStart(period.Duration)
+			capInfo := snap.Cap(period.Name)
+			start := capInfo.WindowStart(period.Duration)
 			used, err := p.db.UserWindowSum(uuid, start.UnixMilli())
 			if err != nil {
 				p.log.Error("查询个人用量失败", "err", err)
 				used = 0
 			}
 			wi.Used = meter.UnitsToUSD(used)
-			wi.ResetsAt = snap.Cap(period.Name).ResetsAt.Format(time.RFC3339)
+			wi.ResetsAt = capInfo.ResetsAt.Format(time.RFC3339)
 			if wi.Limit > 0 {
+				// 百分比永远按 config 原版限额计算
 				pct := wi.Used / wi.Limit * 100
 				wi.Percent = &pct
+				if c.Boost.Enabled && p.boost.boosted(uuid, period.Name, capInfo.ResetsAt.Unix()) {
+					wi.Boosted = true
+					wi.BoostLimit = wi.Limit * float64(c.Boost.BoostPercent) / 100
+				}
 			}
 		}
 		out[period.Name] = wi

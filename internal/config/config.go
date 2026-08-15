@@ -42,6 +42,50 @@ type User struct {
 	Limits map[string]float64 `json:"limits"`
 }
 
+// Boost 临期额度机制（可选）。
+// enabled 时：正常硬卡 = 限额×BaseOveragePercent/100（防对话中途断）；
+// 某窗口 used ≥ TriggerPercent%×L 且满足池子/跨窗口健康时，智能提额到
+// BoostPercent%×L（105% 不叠加），提额状态只存在内存，按 resetsAt 周期对齐。
+type Boost struct {
+	Enabled              bool `json:"enabled"`
+	BaseOveragePercent   int  `json:"base_overage_percent"`
+	TriggerPercent       int  `json:"trigger_percent"`
+	BoostPercent         int  `json:"boost_percent"`
+	PoolMaxPercent       int  `json:"pool_max_percent"`
+	OtherWindowMaxPercent int  `json:"other_window_max_percent"`
+}
+
+// BoostDefaults 返回默认值（未配置时合并到 0 值上，enabled 保持 false）。
+func BoostDefaults() Boost {
+	return Boost{
+		BaseOveragePercent:   105,
+		TriggerPercent:       90,
+		BoostPercent:         150,
+		PoolMaxPercent:       85,
+		OtherWindowMaxPercent: 95,
+	}
+}
+
+// ApplyDefaults 用默认值补齐 0 字段。
+func (b *Boost) ApplyDefaults() {
+	d := BoostDefaults()
+	if b.BaseOveragePercent <= 0 {
+		b.BaseOveragePercent = d.BaseOveragePercent
+	}
+	if b.TriggerPercent <= 0 {
+		b.TriggerPercent = d.TriggerPercent
+	}
+	if b.BoostPercent <= 0 {
+		b.BoostPercent = d.BoostPercent
+	}
+	if b.PoolMaxPercent <= 0 {
+		b.PoolMaxPercent = d.PoolMaxPercent
+	}
+	if b.OtherWindowMaxPercent <= 0 {
+		b.OtherWindowMaxPercent = d.OtherWindowMaxPercent
+	}
+}
+
 // Period 计费周期（名称与时长）。
 type Period struct {
 	Name     string
@@ -66,6 +110,7 @@ type Config struct {
 	RateLimitPerMinute     int                     `json:"rate_limit_per_minute"`
 	LimitsPerUser          map[string]float64      `json:"limits_per_user"`
 	Pricing                map[string]ModelPricing `json:"pricing"`
+	Boost                  Boost                   `json:"boost"`
 	Users                  []User                  `json:"users"`
 
 	keyIndex   map[string]*User
@@ -145,6 +190,24 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	c.applyDefaults()
+	c.Boost.ApplyDefaults()
+	if c.Boost.Enabled {
+		if c.Boost.BaseOveragePercent < 100 {
+			return errors.New("boost.base_overage_percent 不能小于 100")
+		}
+		if c.Boost.BoostPercent <= 100 {
+			return errors.New("boost.boost_percent 必须大于 100")
+		}
+		if c.Boost.TriggerPercent <= 0 || c.Boost.TriggerPercent > 100 {
+			return errors.New("boost.trigger_percent 必须在 (0,100] 区间")
+		}
+		if c.Boost.PoolMaxPercent <= 0 || c.Boost.PoolMaxPercent > 100 {
+			return errors.New("boost.pool_max_percent 必须在 (0,100] 区间")
+		}
+		if c.Boost.OtherWindowMaxPercent <= 0 || c.Boost.OtherWindowMaxPercent > 100 {
+			return errors.New("boost.other_window_max_percent 必须在 (0,100] 区间")
+		}
+	}
 	if c.UpstreamBase == "" {
 		return errors.New("upstream_base 不能为空")
 	}

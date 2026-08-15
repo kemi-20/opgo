@@ -5,6 +5,14 @@
   "admin_password": "ADMIN_REPLACE_ME",
   "balance_interval_seconds": 120,
   "rate_limit_per_minute": 60,
+  "boost": {
+    "enabled": true,
+    "base_overage_percent": 105,
+    "trigger_percent": 90,
+    "boost_percent": 150,
+    "pool_max_percent": 85,
+    "other_window_max_percent": 95
+  },
   "limits_per_user": {
     "5h": 2.40,
     "1w": 6.00,
@@ -15,6 +23,13 @@
       "input_per_million": 0.14,
       "output_per_million": 0.28,
       "cached_read_per_million": 0.0028,
+      "cached_write_per_million": 0,
+      "context_length": 1048576
+    },
+    "deepseek-v4-pro": {
+      "input_per_million": 0.56,
+      "output_per_million": 1.12,
+      "cached_read_per_million": 0.0112,
       "cached_write_per_million": 0,
       "context_length": 1048576
     },

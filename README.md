@@ -4,7 +4,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、mimo-v2.5 官方定价）
+- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 总池保护：以上游实时余量接口为准，额度用尽即 429
 - 流式请求照常计费（自动注入 include_usage，兼容 OpenAI / Anthropic 协议）
@@ -60,7 +60,26 @@ go build -o opgo.exe .
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
 | pricing | 模型单价（每百万 token）+ context_length（上下文长度，可省略） |
+| boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
+
+## 配置热更新
+
+程序后台每 1 秒轮询 config 文件，修改保存后**无需重启**立即生效：
+
+- users（增删用户/key）、pricing（价格/模型列表/context_length）、limits_per_user、master_key、admin_password、rate_limit_per_minute、upstream_base、balance_url、balance_interval_seconds
+- 配置文件非法（JSON 错误或校验不通过）时自动保留旧配置并在日志告警，不影响运行
+- 仅 `listen` 变更需要重启生效，检测到时会打印警告日志
+
+## 智能提额（boost，可选）
+
+`boost.enabled` 开启后：
+
+- **后台缓冲**：正常情况下限硬卡 = 限额 × 105%（前端仍按原限额显示百分比），防止对话写到一半被 429 中断
+- **智能提额**：某窗口用量达到限额的 90% 时，若同时满足「该窗口总池余量充足（percent < pool_max_percent 且 status=ok）」与「另外两个窗口用量 < other_window_max_percent」，自动把该窗口限额提到 boost_percent%（默认 150%）
+- 提额后硬卡 = 提额后限额（105% 不叠加）；同一用户同一窗口在同一个重置周期内只提一次，重置后自动恢复并可再次触发
+- 前端：提额窗口在原始限额旁显示绿色徽章「智能提额至 $X.XX」，百分比永远按 config 原版限额计算；未提额且用量超过原限额（100%~105% 缓冲内）时显示橙色「已超额」徽章
+- 提额状态仅存内存；总池 percent ≥ 100 / status 非 ok 的 429 硬拦截不受任何提额影响
 
 ## 计费与限额
 

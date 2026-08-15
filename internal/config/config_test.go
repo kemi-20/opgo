@@ -18,6 +18,7 @@ const exampleJSON = `{
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
 		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+		"deepseek-v4-pro": {"input_per_million": 0.56, "output_per_million": 1.12, "cached_read_per_million": 0.0112, "cached_write_per_million": 0, "context_length": 1048576},
 		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
 	},
 	"users": [
@@ -41,11 +42,16 @@ func TestParseExample(t *testing.T) {
 	if c.UpstreamBase != "https://PROVIDER_HOST/v1" {
 		t.Errorf("upstream = %q", c.UpstreamBase)
 	}
-	if got := c.ModelNames(); len(got) != 2 || got[0] != "deepseek-v4-flash" || got[1] != "mimo-v2.5" {
+	if got := c.ModelNames(); len(got) != 3 || got[0] != "deepseek-v4-flash" || got[1] != "deepseek-v4-pro" || got[2] != "mimo-v2.5" {
 		t.Errorf("model order = %v", got)
 	}
 	if _, ok := c.Price("mimo-v2.5"); !ok {
 		t.Error("mimo-v2.5 应有价格")
+	}
+	if pp, ok := c.Price("deepseek-v4-pro"); !ok {
+		t.Error("deepseek-v4-pro 应有价格")
+	} else if pp.InputPerMillion != 0.56 || pp.OutputPerMillion != 1.12 || pp.CachedReadPerMillion != 0.0112 || pp.CachedWritePerMillion != 0 {
+		t.Errorf("deepseek-v4-pro 价格 = %+v，应为 flash 的 4 倍", pp)
 	}
 	if _, ok := c.Price("nope"); ok {
 		t.Error("nope 不应有价格")
@@ -168,7 +174,7 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := c.RawPricing()
-	if len(list) != 2 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "mimo-v2.5" {
+	if len(list) != 3 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "deepseek-v4-pro" || list[2].Model != "mimo-v2.5" {
 		t.Fatalf("RawPricing 顺序 = %+v，应保持 config 书写顺序", list)
 	}
 	p := list[0].Price
@@ -198,7 +204,7 @@ func TestContextLengthOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"deepseek-v4-flash", "mimo-v2.5"} {
+	for _, name := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5"} {
 		p, ok := c.Price(name)
 		if !ok {
 			t.Fatalf("%s 应有价格", name)
@@ -206,5 +212,60 @@ func TestContextLengthOptional(t *testing.T) {
 		if p.HasContextLength() {
 			t.Errorf("%s 未配置 context_length 时应视为空", name)
 		}
+	}
+}
+
+func TestBoostDefaultsWhenAbsent(t *testing.T) {
+	c, err := Parse([]byte(exampleJSON)) // exampleJSON 未含 boost
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boost.Enabled {
+		t.Error("未配置 boost 时 enabled 应为 false")
+	}
+	if c.Boost.BaseOveragePercent != 105 || c.Boost.TriggerPercent != 90 ||
+		c.Boost.BoostPercent != 150 || c.Boost.PoolMaxPercent != 85 || c.Boost.OtherWindowMaxPercent != 95 {
+		t.Errorf("默认值 = %+v", c.Boost)
+	}
+}
+
+func TestBoostParseEnabled(t *testing.T) {
+	cfg := strings.Replace(exampleJSON, `"rate_limit_per_minute": 60,`,
+		`"rate_limit_per_minute": 60, "boost": {"enabled": true, "base_overage_percent": 110, "trigger_percent": 92, "boost_percent": 160, "pool_max_percent": 88, "other_window_max_percent": 75},`, 1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Boost.Enabled || c.Boost.BaseOveragePercent != 110 || c.Boost.TriggerPercent != 92 ||
+		c.Boost.BoostPercent != 160 || c.Boost.PoolMaxPercent != 88 || c.Boost.OtherWindowMaxPercent != 75 {
+		t.Errorf("boost = %+v", c.Boost)
+	}
+}
+
+func TestBoostValidation(t *testing.T) {
+	with := func(patch string) string {
+		return strings.Replace(exampleJSON, `"rate_limit_per_minute": 60,`,
+			`"rate_limit_per_minute": 60, "boost": {`+patch+`},`, 1)
+	}
+	cases := []struct {
+		name  string
+		cfg   string
+	}{
+		{"base_overage < 100", with(`"enabled": true, "base_overage_percent": 99`)},
+		{"boost_percent <= 100", with(`"enabled": true, "boost_percent": 100`)},
+		{"trigger > 100", with(`"enabled": true, "trigger_percent": 101`)},
+		{"pool_max > 100", with(`"enabled": true, "pool_max_percent": 101`)},
+		{"other_window > 100", with(`"enabled": true, "other_window_max_percent": 101`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tc.cfg)); err == nil {
+				t.Error("应校验失败")
+			}
+		})
+	}
+	// 未启用时非法值不报错（不校验）
+	if _, err := Parse([]byte(with(`"enabled": false, "base_overage_percent": 99`))); err != nil {
+		t.Errorf("未启用不应校验失败: %v", err)
 	}
 }

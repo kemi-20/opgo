@@ -49,6 +49,14 @@ func main() {
 		cfg.Listen = *listen
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 可热更新的配置：后台轮询配置文件，变更（users/pricing/limits/master_key 等）即时生效；
+	// 仅 listen 变更需重启，检测到时会记录警告。
+	mgr := config.NewManager(cfg, *cfgPath, exampleConfig, logger)
+	mgr.Watch(ctx, time.Second)
+
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		logger.Error("数据库打开失败", "err", err, "db", *dbPath)
@@ -56,13 +64,10 @@ func main() {
 	}
 	defer st.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	bal := balance.New(cfg.BalanceURL, cfg.MasterKey, time.Duration(cfg.BalanceIntervalSeconds)*time.Second, 10*time.Second, logger)
+	bal := balance.New(func() *config.Config { return mgr.Get() }, 10*time.Second, logger)
 	bal.Start(ctx)
 
-	handler := proxy.New(cfg, st, indexHTML, bal, logger)
+	handler := proxy.New(mgr, st, indexHTML, bal, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

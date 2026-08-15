@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"opgo/internal/balance"
 	"opgo/internal/config"
+	"opgo/internal/meter"
 	"opgo/internal/store"
 )
 
@@ -34,6 +37,7 @@ func testConfigJSON(upstream string) string {
 		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 		"pricing": {
 			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
+			"deepseek-v4-pro": {"input_per_million": 0.56, "output_per_million": 1.12, "cached_read_per_million": 0.0112, "cached_write_per_million": 0, "context_length": 1048576},
 			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
 		},
 		"users": [
@@ -58,16 +62,18 @@ func newTestProxy(t *testing.T, upstream string, bal BalanceSource, mutate func(
 	}
 	t.Cleanup(func() { db.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, db, []byte("<html>test</html>"), bal, log), db
+	mgr := config.NewManager(cfg, "", nil, log)
+	return New(mgr, db, []byte("<html>test</html>"), bal, log), db
 }
 
 type fakeUpstream struct {
-	mu       sync.Mutex
-	lastAuth string
-	lastPath string
-	lastBody []byte
-	stream   bool
-	status   int
+	mu        sync.Mutex
+	lastAuth  string
+	lastPath  string
+	lastBody  []byte
+	stream    bool
+	status    int
+	zeroUsage bool
 }
 
 func (f *fakeUpstream) handler() http.Handler {
@@ -90,6 +96,10 @@ func (f *fakeUpstream) handler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(st)
+		if f.zeroUsage {
+			fmt.Fprint(w, "{\"id\":\"x\",\"object\":\"chat.completion\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
+			return
+		}
 		fmt.Fprint(w, "{\"id\":\"x\",\"object\":\"chat.completion\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150,\"prompt_tokens_details\":{\"cached_tokens\":10}}}")
 	})
 }
@@ -357,7 +367,7 @@ func TestModelsList(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 2 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "mimo-v2.5" {
+	if len(obj.Data) != 3 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" {
 		t.Errorf("models = %+v", obj.Data)
 	}
 	for i, m := range obj.Data {
@@ -649,7 +659,268 @@ func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 2 {
+	if len(obj.Data) != 3 {
 		t.Errorf("models = %+v", obj.Data)
+	}
+}
+
+func hotConfig(upstream, master, userKey, model, price string) string {
+	return fmt.Sprintf(`{
+		"listen": ":0",
+		"upstream_base": %q,
+		"master_key": %q,
+		"admin_password": "admin-pw-123",
+		"rate_limit_per_minute": 0,
+		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
+		"pricing": {
+			%q: {"input_per_million": %s, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576}
+		},
+		"users": [
+			{"uuid": "uuid-hot", "remark": "", "keys": [%q]}
+		]
+	}`, upstream, master, model, price, userKey)
+}
+
+// TestHotReloadConfig 验证：改配置文件后 Reload，users/pricing/master_key/models 即时生效，
+// 旧 key 立即失效，无需重启。
+func TestHotReloadConfig(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	vA := hotConfig(up.URL, "sk-MASTER-A", "sk-key-a", "mimo-v2.5", "0.14")
+	if err := os.WriteFile(path, []byte(vA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse([]byte(vA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := config.NewManager(cfg, path, nil, log)
+	db, err := store.Open(t.TempDir() + "/usage.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p := New(mgr, db, []byte("<html>test</html>"), &fixedBalance{snap: okSnapshot()}, log)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 版本 A：key-a 可用，上游收到 master A
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", "sk-key-a", chatBody); st != 200 {
+		t.Fatalf("vA key-a status = %d", st)
+	}
+	if got := fu.auth(); got != "Bearer sk-MASTER-A" {
+		t.Errorf("vA 上游收到 %q", got)
+	}
+
+	// 热更新到版本 B：换 key / master / 模型
+	vB := hotConfig(up.URL, "sk-MASTER-B", "sk-key-b", "grok-test", "1.23")
+	if err := os.WriteFile(path, []byte(vB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// 旧 key 立即失效
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", "sk-key-a", chatBody); st != 401 {
+		t.Errorf("热更新后旧 key status = %d, want 401", st)
+	}
+	// 新 key 可用，且上游收到新 master
+	b2 := "{\"model\":\"grok-test\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", "sk-key-b", b2); st != 200 {
+		t.Fatalf("vB key-b status = %d", st)
+	}
+	if got := fu.auth(); got != "Bearer sk-MASTER-B" {
+		t.Errorf("vB 上游收到 %q", got)
+	}
+	// /models 反映新模型列表
+	st, modelsBody, _ := doReq(t, srv, "GET", "/v1/models", "sk-key-b", "")
+	if st != 200 {
+		t.Fatalf("models status = %d", st)
+	}
+	if !strings.Contains(modelsBody, "grok-test") || strings.Contains(modelsBody, "mimo-v2.5") {
+		t.Errorf("models 未反映热更新配置: %s", modelsBody)
+	}
+}
+
+// ---- 智能提额（boost）测试 ----
+
+func boostCfg() config.Boost {
+	return config.Boost{
+		Enabled: true, BaseOveragePercent: 105,
+		TriggerPercent: 90, BoostPercent: 150,
+		PoolMaxPercent: 85, OtherWindowMaxPercent: 95,
+	}
+}
+
+// seedUnits 直接向 db 写入指定美元金额的消费记录（落在当前 5h 窗口内）。
+func seedUnits(t *testing.T, db *store.Store, uuid string, usd float64) {
+	t.Helper()
+	seedUnitsAt(t, db, uuid, usd, time.Now())
+}
+
+// seedUnitsAt 在指定时间写入消费记录（用于把记录放在 5h 窗口外、1w 窗口内等）。
+func seedUnitsAt(t *testing.T, db *store.Store, uuid string, usd float64, at time.Time) {
+	t.Helper()
+	if err := db.RecordUsage(uuid, "sk-seed", "deepseek-v4-flash", "/v1/chat/completions", meter.Usage{}, meter.USDToUnits(usd), at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// apiWindow 查询 /api/usage 并返回某个窗口信息。
+func apiWindow(t *testing.T, srv *httptest.Server, key, period string) map[string]any {
+	t.Helper()
+	status, body, _ := doReq(t, srv, "POST", "/api/usage", "", `{"key":"`+key+`"}`)
+	if status != 200 {
+		t.Fatalf("/api/usage status = %d: %s", status, body)
+	}
+	var obj struct {
+		Windows map[string]map[string]any `json:"windows"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	return obj.Windows[period]
+}
+
+// 5h 限额 L=2.4。boost 未启用：硬卡 = L（严格）。
+func TestBoostDisabledStrictLimit(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil) // boost 默认 disabled
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	seedUnits(t, db, "uuid-1", 2.4*0.99)
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("0.99L status = %d, want 200", st)
+	}
+	seedUnits(t, db, "uuid-1", 2.4*0.02) // 累计 1.01L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
+		t.Fatalf("1.01L status = %d: %s, want 429", st, body)
+	}
+}
+
+// boost 启用但池子闸门挡住（总池 90 ≥ 85）：不提额，硬卡 = L×105%。
+func TestBoost105BufferPoolGateBlocksBoost(t *testing.T) {
+	snap := okSnapshot()
+	snap.Rolling.Percent = 90 // 池子接近用尽，不应提额
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: snap}, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	seedUnits(t, db, "uuid-1", 2.4*1.04)
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("1.04L status = %d: %s, want 200（105%% 缓冲内）", st, body)
+	}
+	w := apiWindow(t, srv, testUser1, "5h")
+	if w["boosted"] != false {
+		t.Errorf("池子闸门应阻止提额, windows=%v", w)
+	}
+	seedUnits(t, db, "uuid-1", 2.4*0.02) // 累计 1.06L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
+		t.Fatalf("1.06L status = %d: %s, want 429（超出 105%% 硬卡）", st, body)
+	}
+}
+
+// 条件满足：0.95L 触发提额 → 硬卡 1.5L；API 报告 boosted/boost_limit；前端字段完整。
+func TestBoostTriggersAndRaisesLimit(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	seedUnits(t, db, "uuid-1", 2.4*0.95) // ≥ 90% 触发
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("0.95L status = %d: %s", st, body)
+	}
+	w := apiWindow(t, srv, testUser1, "5h")
+	if w["boosted"] != true {
+		t.Fatalf("应已提额, windows=%v", w)
+	}
+	if bl, _ := w["boost_limit"].(float64); bl != 3.6 {
+		t.Errorf("boost_limit = %v, want 3.6", w["boost_limit"])
+	}
+	if lim, _ := w["limit"].(float64); lim != 2.4 {
+		t.Errorf("limit 应保持原版 2.4, got %v", w["limit"])
+	}
+	if pct, _ := w["percent"].(float64); pct < 94 || pct > 96 {
+		t.Errorf("percent 应按原限额显示 ≈95, got %v", w["percent"])
+	}
+
+	// 提额后用到 1.2L（<1.5L）放行；同周期不再重复提额（boost_limit 仍 3.6）
+	seedUnits(t, db, "uuid-1", 2.4*0.25) // 累计 1.2L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("1.2L status = %d: %s, want 200", st, body)
+	}
+	w2 := apiWindow(t, srv, testUser1, "5h")
+	if bl, _ := w2["boost_limit"].(float64); bl != 3.6 {
+		t.Errorf("同周期不应重复提额, boost_limit = %v", w2["boost_limit"])
+	}
+
+	// 1.6L > 1.5L → 429
+	seedUnits(t, db, "uuid-1", 2.4*0.4) // 累计 1.6L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
+		t.Fatalf("1.6L status = %d: %s, want 429（超提额硬卡）", st, body)
+	}
+}
+
+// 跨窗口健康检查：1w 已近限（≥95%）时，5h 不提额。
+func TestBoostOtherWindowBlocks(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 1w 限额 6.0：5h 的 2.28 也计入 1w，因此 1w 只需额外 seed 3.42（合计 5.70 = 95%×6，
+	// ≥95% 挡提额，且 <6.3 不拦请求）。记录放在 5h 窗口外（now-6h）。
+	seedUnitsAt(t, db, "uuid-1", 3.42, time.Now().Add(-6*time.Hour))
+	seedUnits(t, db, "uuid-1", 2.4*0.95) // 5h 到 95%，触发条件满足但跨窗口挡
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("status = %d: %s", st, body)
+	}
+	w := apiWindow(t, srv, testUser1, "5h")
+	if w["boosted"] != false {
+		t.Errorf("跨窗口不健康应阻止提额, windows=%v", w)
+	}
+}
+
+// 重置（resetsAt 变化）后允许重新提额。
+func TestBoostResetAllowsReBoost(t *testing.T) {
+	snap := okSnapshot()
+	fs := &fixedBalance{snap: snap}
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, fs, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	seedUnits(t, db, "uuid-1", 2.4*0.95)
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("第一周期应提额")
+	}
+	// 模拟 provider 重置：resetsAt 前移（新周期窗口起点回到 seed 之前，旧消费仍在窗口内）
+	snap.Rolling.ResetsAt = snap.Rolling.ResetsAt.Add(-5 * time.Hour)
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("新周期 status = %d", st)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("新周期应允许重新提额（否则 boosted 应为 false）")
 	}
 }

@@ -101,9 +101,10 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	defer db1.Close()
 	defer os.Remove(db1Path)
 
-	srv1 := httptest.NewServer(proxy.New(&cfgUp, db1, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
+	mgrUp := config.NewManager(&cfgUp, "", nil, log)
+	srv1 := httptest.NewServer(proxy.New(mgrUp, db1, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
 	defer srv1.Close()
-	srv2 := httptest.NewServer(proxy.New(&cfgUp, db1, indexHTML, &noBalance{}, log))
+	srv2 := httptest.NewServer(proxy.New(mgrUp, db1, indexHTML, &noBalance{}, log))
 	defer srv2.Close()
 
 	cfgTiny := cfgUp
@@ -115,12 +116,14 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	}
 	defer db2.Close()
 	defer os.Remove(db2Path)
-	srv3 := httptest.NewServer(proxy.New(&cfgTiny, db2, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
+	mgrTiny := config.NewManager(&cfgTiny, "", nil, log)
+	srv3 := httptest.NewServer(proxy.New(mgrTiny, db2, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
 	defer srv3.Close()
 
 	cfgBad := cfgUp
 	cfgBad.UpstreamBase = "http://127.0.0.1:1"
-	srv4 := httptest.NewServer(proxy.New(&cfgBad, db2, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
+	mgrBad := config.NewManager(&cfgBad, "", nil, log)
+	srv4 := httptest.NewServer(proxy.New(mgrBad, db2, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
 	defer srv4.Close()
 
 	client := &http.Client{Timeout: 30 * time.Second}
