@@ -1,0 +1,8 @@
+config.json
+usage.db
+usage.db-wal
+usage.db-shm
+dist/
+*.exe
+*.exe~
+.tmp/

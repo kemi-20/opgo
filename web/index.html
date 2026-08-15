@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opgo · Coding Plan 用量中心</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--line:#2a2e38;--text:#e6e8ee;--muted:#9aa0ad;--accent:#4f8cff;--ok:#2ecc71;--warn:#f39c12;--danger:#e74c3c}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;padding:24px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.tabs{display:flex;gap:8px;margin-bottom:20px}
+.tab{padding:8px 18px;border-radius:8px;cursor:pointer;background:var(--card);border:1px solid var(--line);color:var(--muted)}
+.tab.active{color:#fff;border-color:var(--accent);background:rgba(79,140,255,.12)}
+.panel{display:none}.panel.active{display:block}
+.bar{display:flex;gap:8px;margin-bottom:16px}
+input{flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:14px}
+button{padding:10px 22px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h3{font-size:13px;color:var(--muted);font-weight:500;margin-bottom:10px}
+.nums{font-size:15px;margin-bottom:8px}
+.nums b{font-size:22px}
+.pct{font-size:12px;color:var(--muted)}
+.track{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:8px}
+.fill{height:100%;border-radius:3px}
+.fill.ok{background:var(--ok)}.fill.warn{background:var(--warn)}.fill.danger{background:var(--danger)}
+.meta{margin-top:16px;color:var(--muted);font-size:13px}
+.err{color:var(--danger);margin-top:10px;font-size:13px}
+.sect{margin-top:22px}
+.sect h2{font-size:15px;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500}
+.sync{color:var(--warn);font-size:12px;margin-left:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>opgo · Coding Plan 用量中心</h1>
+<div class="sub">输入 key 或管理员密码查询用量</div>
+<div class="tabs">
+<div class="tab active" data-tab="user">用户查询</div>
+<div class="tab" data-tab="admin">管理员</div>
+</div>
+
+<div class="panel active" id="p-user">
+<div class="bar"><input id="u-key" type="password" placeholder="输入你的 key（sk-...）" autocomplete="off"><button id="u-btn">查询</button></div>
+<div id="u-err" class="err"></div>
+<div id="u-result" style="display:none">
+<div class="meta">UUID：<span id="u-uuid"></span><span id="u-sync" class="sync"></span></div>
+<div class="grid" id="u-grid"></div>
+<div class="sect"><h2>总池（套餐实时余量）</h2><div class="grid" id="u-total"></div></div>
+</div>
+</div>
+
+<div class="panel" id="p-admin">
+<div class="bar"><input id="a-pass" type="password" placeholder="管理员密码" autocomplete="off"><button id="a-btn">查询</button></div>
+<div id="a-err" class="err"></div>
+<div id="a-result" style="display:none">
+<div class="sect"><h2>总池（套餐实时余量）</h2><div class="grid" id="a-total"></div></div>
+<div class="sect"><h2>全部用户</h2><table id="a-table"><thead><tr><th>UUID</th><th>备注</th><th>5小时</th><th>一周</th><th>31天</th></tr></thead><tbody></tbody></table></div>
+</div>
+</div>
+</div>
+
+<script>
+"use strict";
+var $ = function (s) { return document.querySelector(s); };
+var money = function (v) { return "$" + Number(v).toFixed(2); };
+var pctText = function (v) { return v == null ? "不限" : Number(v).toFixed(2) + "%"; };
+
+function makeCard(title, rows) {
+  var card = document.createElement("div");
+  card.className = "card";
+  var h = document.createElement("h3");
+  h.textContent = title;
+  card.appendChild(h);
+  var nums = document.createElement("div");
+  nums.className = "nums";
+  nums.appendChild(rows.numNode);
+  card.appendChild(nums);
+  var p = document.createElement("div");
+  p.className = "pct";
+  p.textContent = rows.pctText;
+  card.appendChild(p);
+  if (rows.bar != null) {
+    var track = document.createElement("div");
+    track.className = "track";
+    var fill = document.createElement("div");
+    fill.className = "fill " + rows.barCls;
+    fill.style.width = rows.bar.toFixed(1) + "%";
+    track.appendChild(fill);
+    card.appendChild(track);
+  }
+  return card;
+}
+
+function userWindowCard(label, w) {
+  var num = document.createElement("span");
+  var b = document.createElement("b");
+  b.textContent = money(w.used);
+  num.appendChild(b);
+  var lim = document.createElement("span");
+  lim.style.color = "var(--muted)";
+  lim.textContent = " / " + (w.limit > 0 ? money(w.limit) : "不限");
+  num.appendChild(lim);
+  var rows = { numNode: num, pctText: "已用 " + pctText(w.percent) };
+  if (w.percent != null) {
+    var p = Math.min(100, Number(w.percent));
+    rows.bar = p;
+    rows.barCls = p >= 90 ? "danger" : p >= 70 ? "warn" : "ok";
+  }
+  if (w.resets_at) { rows.pctText += " · 重置 " + w.resets_at; }
+  return makeCard(label, rows);
+}
+
+function poolCard(label, c) {
+  var num = document.createElement("span");
+  var b = document.createElement("b");
+  b.textContent = c.percent == null ? "—" : Number(c.percent).toFixed(2) + "%";
+  num.appendChild(b);
+  var st = document.createElement("span");
+  st.style.color = "var(--muted)";
+  st.textContent = " / " + (c.status || "-");
+  num.appendChild(st);
+  var rows = { numNode: num, pctText: c.resets_at ? "重置 " + c.resets_at : "同步中…" };
+  if (c.percent != null) {
+    var p = Math.min(100, Number(c.percent));
+    rows.bar = p;
+    rows.barCls = p >= 90 ? "danger" : p >= 70 ? "warn" : "ok";
+  }
+  return makeCard(label, rows);
+}
+
+function fillWindows(container, windows, kind) {
+  container.textContent = "";
+  var order = [["5h", "5小时"], ["1w", "一周"], ["1m", "31天"]];
+  order.forEach(function (o) {
+    var w = (windows && windows[o[0]]) || {};
+    container.appendChild(kind === "pool" ? poolCard(o[1], w) : userWindowCard(o[1], w));
+  });
+}
+
+function post(url, body) {
+  return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, data: d }; }).catch(function () { return { ok: r.ok, data: {} }; });
+    });
+}
+
+function showErr(el, msg) { el.textContent = msg || ""; }
+
+function syncNote(data) {
+  var el = $("#u-sync");
+  if (!data.synced) { el.textContent = "（套餐余量同步中）"; }
+  else if (data.snapshot_at) { el.textContent = "（快照 " + data.snapshot_at + "）"; }
+  else { el.textContent = ""; }
+}
+
+$("#u-btn").addEventListener("click", function () {
+  var key = $("#u-key").value.trim();
+  var err = $("#u-err");
+  showErr(err, "");
+  if (!key) { showErr(err, "请输入 key"); return; }
+  $("#u-btn").disabled = true;
+  post("/api/usage", { key: key }).then(function (res) {
+    if (!res.ok) { showErr(err, (res.data && res.data.error) || "查询失败"); return; }
+    $("#u-result").style.display = "";
+    $("#u-uuid").textContent = res.data.uuid || "";
+    syncNote(res.data);
+    fillWindows($("#u-grid"), res.data.windows, "user");
+    fillWindows($("#u-total"), res.data.total, "pool");
+  }).catch(function (e) { showErr(err, "网络错误: " + e); }).finally(function () { $("#u-btn").disabled = false; });
+});
+
+$("#a-btn").addEventListener("click", function () {
+  var pass = $("#a-pass").value;
+  var err = $("#a-err");
+  showErr(err, "");
+  if (!pass) { showErr(err, "请输入密码"); return; }
+  $("#a-btn").disabled = true;
+  post("/api/admin", { password: pass }).then(function (res) {
+    if (!res.ok) { showErr(err, (res.data && res.data.error) || "密码错误"); return; }
+    $("#a-result").style.display = "";
+    fillWindows($("#a-total"), res.data.total, "pool");
+    var tb = $("#a-table tbody");
+    tb.textContent = "";
+    (res.data.users || []).forEach(function (u) {
+      var tr = document.createElement("tr");
+      [u.uuid || "", u.remark || ""].forEach(function (txt) {
+        var td = document.createElement("td");
+        td.textContent = txt;
+        tr.appendChild(td);
+      });
+      [["5h", "5小时"], ["1w", "一周"], ["1m", "31天"]].forEach(function (o) {
+        var w = (u.windows && u.windows[o[0]]) || {};
+        var td = document.createElement("td");
+        td.textContent = money(w.used) + " / " + (w.limit > 0 ? money(w.limit) : "不限") + "（" + pctText(w.percent) + "）";
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+  }).catch(function (e) { showErr(err, "网络错误: " + e); }).finally(function () { $("#a-btn").disabled = false; });
+});
+
+["u-key", "a-pass"].forEach(function (id) {
+  $("#" + id).addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { (id === "u-key" ? $("#u-btn") : $("#a-btn")).click(); }
+  });
+});
+
+document.querySelectorAll(".tab").forEach(function (t) {
+  t.addEventListener("click", function () {
+    document.querySelectorAll(".tab").forEach(function (x) { x.classList.toggle("active", x === t); });
+    document.querySelectorAll(".panel").forEach(function (x) { x.classList.toggle("active", x.id === "p-" + t.dataset.tab); });
+  });
+});
+</script>
+</body>
+</html>
+
