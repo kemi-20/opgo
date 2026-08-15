@@ -168,9 +168,20 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后再试")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	// 图片上传场景 body 可能很大（JSON 内嵌 base64），上限 512MB；
+	// 超限返回 413，绝不静默截断后转发损坏的 JSON。
+	const maxBodyBytes = 512 << 20
+	if r.ContentLength > maxBodyBytes {
+		p.writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "请求体过大（超过 512MB）")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		p.writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "读取请求体失败")
+		return
+	}
+	if len(body) > maxBodyBytes {
+		p.writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "请求体过大（超过 512MB）")
 		return
 	}
 	model := meter.RequestModel(body)
@@ -216,13 +227,14 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "构建上游请求失败")
 		return
 	}
+	// 最小干预：除认证外全部原样透传（含 UA、Content-Type、其他头）。
 	copyHeaders(req.Header, r.Header)
-	req.Header.Del("Content-Length")
+	req.Header.Del("Content-Length") // 由 Go 按 body 自动重算（值不变）
 	req.Header.Set("Authorization", "Bearer "+c.MasterKey)
 	req.Header.Set("x-api-key", c.MasterKey)
+	// Accept-Encoding 强制 identity：代理必须读取响应 body 解析 usage 计费，
+	// 压缩响应无法解析；对客户端透明（Accept-Encoding 仅是偏好）。
 	req.Header.Set("Accept-Encoding", "identity")
-	// 使用浏览器 UA，避免上游 CDN 按指纹拦截非浏览器客户端
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 	removeHopHeaders(req.Header)
 
 	resp, err := p.transport.RoundTrip(req)
@@ -242,9 +254,15 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		p.streamCopy(w, r, resp, user, key, model, price, now)
 		return
 	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+	const maxRespBytes = 512 << 20
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
 	if err != nil {
 		p.log.Warn("读取上游响应失败", "err", err)
+		return
+	}
+	if len(respBody) > maxRespBytes {
+		p.log.Warn("上游响应过大", "bytes", len(respBody))
+		p.writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "上游响应过大")
 		return
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && model != "" {

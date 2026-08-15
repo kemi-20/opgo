@@ -1,6 +1,7 @@
 package meter
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"strings"
@@ -51,6 +52,8 @@ func RequestModel(body []byte) string {
 }
 
 // EnsureStreamUsage 对流式 OpenAI 风格请求注入 stream_options.include_usage=true（若缺失）。
+// 采用字节级最小注入：仅在 JSON 对象开头插入一个键，其余字节（图片 base64、字段顺序、
+// 数字精度）完全不动；仅当请求已带 stream_options 但缺 include_usage 时才整体重排（罕见）。
 func EnsureStreamUsage(body []byte) ([]byte, bool) {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
@@ -60,22 +63,29 @@ func EnsureStreamUsage(body []byte) ([]byte, bool) {
 	if !stream {
 		return body, false
 	}
-	so, _ := obj["stream_options"].(map[string]any)
-	if so == nil {
-		so = map[string]any{}
+	if so, _ := obj["stream_options"].(map[string]any); so != nil {
+		if inc, _ := so["include_usage"].(bool); inc {
+			return body, false
+		}
+		so["include_usage"] = true
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body, false
+		}
+		return out, true
 	}
-	if inc, _ := so["include_usage"].(bool); inc {
+	trim := bytes.TrimLeft(body, " \t\r\n")
+	if len(trim) == 0 || trim[0] != '{' {
 		return body, false
 	}
-	so["include_usage"] = true
-	obj["stream_options"] = so
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body, false
-	}
+	off := len(body) - len(trim)
+	inject := []byte(`"stream_options":{"include_usage":true},`)
+	out := make([]byte, 0, len(body)+len(inject)+1)
+	out = append(out, body[:off+1]...)
+	out = append(out, inject...)
+	out = append(out, body[off+1:]...)
 	return out, true
 }
-
 // usageJSON 同时兼容 OpenAI 与 Anthropic 的用量字段。
 type usageJSON struct {
 	PromptTokens        int64 `json:"prompt_tokens"`

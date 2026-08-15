@@ -1,6 +1,7 @@
 package meter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -132,5 +133,59 @@ func TestEnsureStreamUsage(t *testing.T) {
 	// 非流式不注入
 	if _, changed := EnsureStreamUsage([]byte(`{"model":"m","messages":[]}`)); changed {
 		t.Error("非流式不应注入")
+	}
+}
+
+// TestEnsureStreamUsageMinimalInjection 验证字节级最小注入：插入 stream_options 后，
+// 图片 base64、字段顺序、数字精度等其余字节完全不变（只允许在 { 后追加一个键）。
+func TestEnsureStreamUsageMinimalInjection(t *testing.T) {
+	// 模拟带图片的请求：base64 串特意构造可验证的子串，字段顺序固定
+	body := []byte(`{"model":"deepseek-v4-flash","stream":true,"temperature":0.14,"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}}]}]}`)
+	out, changed := EnsureStreamUsage(body)
+	if !changed {
+		t.Fatal("应注入")
+	}
+	// 注入内容出现在开头
+	if !strings.HasPrefix(string(out), `{"stream_options":{"include_usage":true},`) {
+		t.Errorf("注入应位于对象开头: %s", out)
+	}
+	// 原 body 的所有字节（去掉开头 { 后）必须按原顺序完整出现
+	rest := string(body)[1:]
+	if !strings.Contains(string(out), rest) {
+		t.Error("注入后原字节被改动（图片 base64/字段顺序/数字精度不应变）")
+	}
+	// base64 子串精确保留
+	if !strings.Contains(string(out), "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==") {
+		t.Error("图片 base64 应原样保留")
+	}
+	// 数字精度保留
+	if !strings.Contains(string(out), `"temperature":0.14`) {
+		t.Error("数字精度应原样保留")
+	}
+	// 注入后仍是合法 JSON 且可解析出模型与图片
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("注入后不是合法 JSON: %v", err)
+	}
+	if obj["model"] != "deepseek-v4-flash" {
+		t.Errorf("model = %v", obj["model"])
+	}
+	if obj["stream_options"].(map[string]any)["include_usage"] != true {
+		t.Error("include_usage 应为 true")
+	}
+}
+
+// TestEnsureStreamUsagePreservesWhitespace 前导空白保留：{ 前有空格/换行时注入位置正确。
+func TestEnsureStreamUsagePreservesWhitespace(t *testing.T) {
+	body := []byte("  {\"model\":\"m\",\"stream\":true}")
+	out, changed := EnsureStreamUsage(body)
+	if !changed {
+		t.Fatal("应注入")
+	}
+	if !strings.HasPrefix(string(out), "  {\"stream_options\":{\"include_usage\":true},") {
+		t.Errorf("前导空白应保留: %s", out)
+	}
+	if !strings.Contains(string(out), "\"model\":\"m\"") {
+		t.Error("原字段应保留")
 	}
 }

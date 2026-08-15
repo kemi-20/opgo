@@ -71,6 +71,8 @@ type fakeUpstream struct {
 	lastAuth  string
 	lastPath  string
 	lastBody  []byte
+	lastUA    string
+	lastXTest string
 	stream    bool
 	status    int
 	zeroUsage bool
@@ -82,6 +84,8 @@ func (f *fakeUpstream) handler() http.Handler {
 		f.lastAuth = r.Header.Get("Authorization")
 		f.lastPath = r.URL.Path
 		f.lastBody, _ = io.ReadAll(r.Body)
+		f.lastUA = r.Header.Get("User-Agent")
+		f.lastXTest = r.Header.Get("X-Test-Custom")
 		st := f.status
 		if st == 0 {
 			st = 200
@@ -143,6 +147,12 @@ func okSnapshot() *balance.Snapshot {
 
 func doReq(t *testing.T, srv *httptest.Server, method, path, auth, body string) (int, string, http.Header) {
 	t.Helper()
+	return doReqH(t, srv, method, path, auth, body, nil)
+}
+
+// doReqH 同 doReq，但可附加自定义请求头（用于验证透传）。
+func doReqH(t *testing.T, srv *httptest.Server, method, path, auth, body string, headers map[string]string) (int, string, http.Header) {
+	t.Helper()
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
@@ -153,6 +163,9 @@ func doReq(t *testing.T, srv *httptest.Server, method, path, auth, body string) 
 	}
 	if auth != "" {
 		req.Header.Set("Authorization", "Bearer "+auth)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -922,5 +935,91 @@ func TestBoostResetAllowsReBoost(t *testing.T) {
 	}
 	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
 		t.Fatal("新周期应允许重新提额（否则 boosted 应为 false）")
+	}
+}
+
+// ---- 最小干预透传测试 ----
+
+// TestForwardPassThroughHeaders 验证：除认证外，UA 与自定义头原样透传到上游，
+// 且 /v1 前缀剥离、Authorization 替换为母 key。
+func TestForwardPassThroughHeaders(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	h := map[string]string{
+		"User-Agent":     "MyCustomSDK/1.2.3",
+		"X-Test-Custom":  "hello-world",
+		"X-API-Key":      "client-own-key-should-not-leak",
+	}
+	st, _, _ := doReqH(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody, h)
+	if st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	if fu.auth() != "Bearer "+testMaster {
+		t.Errorf("上游认证 = %q, want 母 key", fu.auth())
+	}
+	if fu.lastUA != "MyCustomSDK/1.2.3" {
+		t.Errorf("UA 应透传客户端值, got %q", fu.lastUA)
+	}
+	if fu.lastXTest != "hello-world" {
+		t.Errorf("自定义头应透传, got %q", fu.lastXTest)
+	}
+	if fu.lastPath != "/chat/completions" {
+		t.Errorf("应剥离 /v1 前缀, got %q", fu.lastPath)
+	}
+	// 客户端自己的 X-API-Key 不得透传（认证全部替换为母 key）
+	if fu.lastXTest == "client-own-key-should-not-leak" {
+		t.Error("客户端 X-API-Key 不应透传")
+	}
+}
+
+// TestForwardRequestBodyUnchanged 验证非流式请求体原样到达上游（字节完全一致）。
+func TestForwardRequestBodyUnchanged(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}}]}]}`
+	st, _, _ := doReqH(t, srv, "POST", "/v1/chat/completions", testUser1, body, nil)
+	if st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	if string(fu.lastBody) != body {
+		t.Error("非流式请求体应逐字节原样透传")
+	}
+}
+
+// TestForwardOversizeBody413 验证超大请求体返回 413，不静默截断转发。
+func TestForwardOversizeBody413(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 构造 Content-Length 超过 512MB 的请求（不真正发送大 body）
+	big := "{\"model\":\"deepseek-v4-flash\",\"messages\":[]}" + strings.Repeat(" ", 513<<20)
+	// 用 HTTP 客户端手动设置 ContentLength 后发送，避免构造 513MB 真实数据
+	req, err := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testUser1)
+	req.ContentLength = int64(len(big))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超大 body status = %d, want 413", resp.StatusCode)
 	}
 }
