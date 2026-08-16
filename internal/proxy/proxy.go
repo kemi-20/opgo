@@ -19,6 +19,7 @@ import (
 	"opgo/internal/config"
 	"opgo/internal/meter"
 	"opgo/internal/store"
+	"opgo/internal/translate"
 )
 
 // BalanceSource 提供余额快照（真实 Syncer 或测试替身）。
@@ -184,6 +185,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		p.writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "请求体过大（超过 512MB）")
 		return
 	}
+	// 协议转换：客户端格式 → 模型配置的目标格式（transformation）。
+	// 未配置/空/false/0 → 透传只替换认证（与以前一致）。
+	srcFormat, srcOK := translate.DetectFormat(r.URL.Path)
+	dstFormat := translate.Format("")
+	transformEnabled := false
 	model := meter.RequestModel(body)
 	price, hasPrice := config.ModelPricing{}, false
 	if model != "" {
@@ -191,6 +197,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		if !hasPrice {
 			p.writeOpenAIError(w, http.StatusForbidden, "model_not_allowed", fmt.Sprintf("模型 %s 未在配置中，无法计费", model))
 			return
+		}
+		if dst, ok := translate.ParseFormat(price.Transformation); ok {
+			dstFormat = dst
+			transformEnabled = srcOK && dst != srcFormat
 		}
 	}
 	snap, synced := p.balance.Snapshot()
@@ -211,14 +221,25 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 流式 usage 注入（仅 OpenAI 风格端点；Anthropic /messages 不注入）。
-	if hasPrice && !strings.HasSuffix(r.URL.Path, "/messages") {
+	// 请求体转换：源格式 → 目标格式
+	upstreamPath := stripV1Prefix(r.URL.Path)
+	if transformEnabled {
+		nb, err := translate.ConvertRequest(srcFormat, dstFormat, body)
+		if err != nil {
+			p.log.Warn("请求协议转换失败", "err", err, "uuid", user.UUID, "model", model)
+			p.writeOpenAIError(w, http.StatusBadGateway, "translate_error", "请求协议转换失败")
+			return
+		}
+		body = nb
+		upstreamPath = translate.FormatPath(dstFormat)
+	} else if hasPrice && !strings.HasSuffix(r.URL.Path, "/messages") {
+		// 流式 usage 注入（仅 OpenAI 风格端点；Anthropic /messages 不注入）。
 		if nb, changed := meter.EnsureStreamUsage(body); changed {
 			body = nb
 		}
 	}
 	// 客户端可用标准 OpenAI 路径（/v1/chat/completions 等）：去掉 /v1 前缀后拼接到上游
-	upstream := c.UpstreamBase + stripV1Prefix(r.URL.Path)
+	upstream := c.UpstreamBase + upstreamPath
 	if r.URL.RawQuery != "" {
 		upstream += "?" + r.URL.RawQuery
 	}
@@ -251,7 +272,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		removeHopHeaders(w.Header())
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
-		p.streamCopy(w, r, resp, user, key, model, price, now)
+		var conv *translate.StreamConverter
+		if transformEnabled {
+			conv = translate.NewStreamConverter(dstFormat, srcFormat, model)
+		}
+		p.streamCopy(w, r, resp, user, key, model, price, now, conv)
 		return
 	}
 	const maxRespBytes = 512 << 20
@@ -270,6 +295,16 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			p.recordUsage(user, key, model, r.URL.Path, u, price, now)
 		}
 	}
+	// 仅 2xx 响应做协议转换；错误响应原样透传（保留上游错误语义与状态码）
+	if transformEnabled && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		nb, err := translate.ConvertResponse(srcFormat, dstFormat, respBody)
+		if err != nil {
+			p.log.Warn("响应协议转换失败", "err", err, "uuid", user.UUID, "model", model)
+			p.writeOpenAIError(w, http.StatusBadGateway, "translate_error", "响应协议转换失败")
+			return
+		}
+		respBody = nb
+	}
 	copyHeaders(w.Header(), resp.Header)
 	removeHopHeaders(w.Header())
 	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
@@ -280,38 +315,77 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 }
 
 // streamCopy 透传 SSE 流，同时解析末尾 usage 并记账。
-func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Response, user *config.User, key, model string, price config.ModelPricing, now time.Time) {
+// conv 非 nil 时把上游（目标格式）流逐行转换为客户端格式再写出。
+func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Response, user *config.User, key, model string, price config.ModelPricing, now time.Time, conv *translate.StreamConverter) {
 	var acc meter.Usage
 	got := false
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 8<<20)
+	writeChunks := func(chunks [][]byte) bool {
+		for _, c := range chunks {
+			if _, err := w.Write(c); err != nil {
+				return false
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return true
+	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if conv == nil {
+			// 透传：同时解析 usage 计费
+			if u, ok := meter.ParseSSEUsage(line); ok {
+				got = true
+				mergeUsage(&acc, u)
+			}
+			lineCopy := make([]byte, len(line))
+			copy(lineCopy, line)
+			if !writeChunks([][]byte{append(lineCopy, '\n')}) {
+				return
+			}
+			continue
+		}
+		// 转换模式：计费解析用上游原始行；写出用转换后的块
 		if u, ok := meter.ParseSSEUsage(line); ok {
 			got = true
-			if u.PromptTokens > 0 || u.CachedTokens > 0 || u.CachedWriteTokens > 0 {
-				acc.PromptTokens = u.PromptTokens
-				acc.CachedTokens = u.CachedTokens
-				acc.CachedWriteTokens = u.CachedWriteTokens
-			}
-			acc.CompletionTokens += u.CompletionTokens
-			if u.TotalTokens > 0 {
-				acc.TotalTokens = u.TotalTokens
-			}
+			mergeUsage(&acc, u)
 		}
-		if _, err := w.Write(line); err != nil {
+		chunks, done := conv.Feed(line)
+		if !writeChunks(chunks) {
 			return
 		}
-		if _, err := w.Write([]byte("\n")); err != nil {
-			return
+		if done {
+			if !writeChunks(conv.Close()) {
+				return
+			}
+			conv = nil // 已关闭，不再补
+			break
 		}
-		if flusher != nil {
-			flusher.Flush()
+	}
+	if conv != nil {
+		// 上游流结束但未见终止事件（如 [DONE] 缺失），补齐终止
+		if !writeChunks(conv.Close()) {
+			return
 		}
 	}
 	if got && model != "" {
 		p.recordUsage(user, key, model, r.URL.Path, acc, price, now)
+	}
+}
+
+// mergeUsage 合并一次用量到累计（补全字段）。
+func mergeUsage(acc *meter.Usage, u meter.Usage) {
+	if u.PromptTokens > 0 || u.CachedTokens > 0 || u.CachedWriteTokens > 0 {
+		acc.PromptTokens = u.PromptTokens
+		acc.CachedTokens = u.CachedTokens
+		acc.CachedWriteTokens = u.CachedWriteTokens
+	}
+	acc.CompletionTokens += u.CompletionTokens
+	if u.TotalTokens > 0 {
+		acc.TotalTokens = u.TotalTokens
 	}
 }
 

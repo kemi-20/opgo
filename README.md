@@ -63,6 +63,40 @@ go build -o opgo.exe .
 | boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
 
+## 协议转换（transformation）
+
+每个模型可在 pricing 中配置 `transformation` 字段，把客户端任意格式自动转换为指定格式转发给上游，支持 OpenAI chat/completions、OpenAI Responses、Anthropic messages 三种格式，完整覆盖**非流式 / 流式 / 思考内容**互转。
+
+```json
+"pricing": {
+  "mimo-v2.5": {
+    "input_per_million": 0.14,
+    "output_per_million": 0.28,
+    "cached_read_per_million": 0.0028,
+    "cached_write_per_million": 0,
+    "context_length": 1048576,
+    "transformation": "openai_completions"
+  }
+}
+```
+
+- **留空 / 不填 / `false` / `0`**：不转换，透传只替换认证头（默认行为，与以前完全一致）
+- **`openai_completions`**：客户端无论用 chat/completions、Responses 还是 Anthropic 访问，都转换为 chat/completions 发给上游
+- **`openai_responses`**：统一转换为 Responses（`/responses`）发给上游
+- **`anthropic`**：统一转换为 Anthropic messages（`/messages`）发给上游
+
+示例：客户端用 Anthropic SDK（`/v1/messages`）访问，模型配置 `transformation: "openai_completions"`，opgo 会把请求转为 chat/completions 发往上游，再把上游响应转回 Anthropic 格式返回——流式、思考（reasoning_content ↔ thinking）都自动处理。计费仍按上游返回的真实 token 用量进行，不受转换影响。
+
+**模型适配建议**：上游对部分模型只完整支持一种端点。示例配置的默认策略：
+
+| 模型 | transformation | 原因 |
+|---|---|---|
+| deepseek-v4-flash / deepseek-v4-pro | （留空透传） | 上游原生端点完整，直接透传只替换认证 |
+| mimo-v2.5 | `openai_completions` | 上游只有 chat/completions 完整（Responses 不稳定、messages 无思考），统一转 completions |
+| gpt-5.6-luna | `openai_responses` | 上游原生支持 Responses（含 web_search），统一转 responses |
+
+客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。
+
 ## 配置热更新
 
 程序后台每 1 秒轮询 config 文件，修改保存后**无需重启**立即生效：

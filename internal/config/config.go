@@ -22,6 +22,10 @@ type ModelPricing struct {
 	CachedWritePerMillion float64 `json:"cached_write_per_million"`
 	// ContextLength 上下文长度（token）；<=0 视为未设置，/models 不输出该字段。
 	ContextLength int64 `json:"context_length"`
+	// Transformation 协议转换目标格式：空/false/0 = 透传只替换认证；
+	// 支持 openai_completions / openai_responses / anthropic。
+	// 客户端以任意格式访问时，自动转换为该格式转发给上游。
+	Transformation string `json:"transformation"`
 }
 
 // HasContextLength 是否配置了上下文长度。
@@ -165,8 +169,53 @@ func LoadStrict(path string, log *slog.Logger) (*Config, error) {
 	return Parse(data)
 }
 
-// Parse 解析并校验配置字节。
+// stripJSONComments 移除 JSONC 风格注释（// 与 /* */），支持 config.example.json
+// 中 transformation 行内注释。逐字符扫描，字符串内（含转义）的 // 不会被误删，
+// 因此 https://... 等 URL 安全。
+func stripJSONComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inStr := false
+	esc := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inStr {
+			out = append(out, c)
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inStr = true
+			out = append(out, c)
+		case c == '/' && i+1 < len(data) && data[i+1] == '/':
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			if i < len(data) {
+				out = append(out, '\n')
+			}
+		case c == '/' && i+1 < len(data) && data[i+1] == '*':
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i++ // 跳过 */
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Parse 解析并校验配置字节。支持 JSONC 注释（// 与 /* */）。
 func Parse(data []byte) (*Config, error) {
+	data = stripJSONComments(data)
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("配置不是合法 JSON: %w", err)

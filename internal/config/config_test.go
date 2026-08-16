@@ -275,3 +275,43 @@ func TestBoostValidation(t *testing.T) {
 		t.Errorf("未启用不应校验失败: %v", err)
 	}
 }
+
+// TestParseJSONCComments 验证：配置支持 // 与 /* */ 注释（transformation 行内注释），
+// 且字符串内（如 https:// URL）的 // 不会被误删。
+func TestParseJSONCComments(t *testing.T) {
+	cfg := `{
+		"listen": ":3003",
+		"upstream_base": "https://PROVIDER_HOST/v1", // URL 里的 // 不能被删
+		"master_key": "sk-REPLACE_ME",
+		"admin_password": "ADMIN_REPLACE_ME",
+		"rate_limit_per_minute": 60,
+		"pricing": {
+			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576, "transformation": "" // 空=透传
+			},
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576, "transformation": "openai_completions" /* 转 completions */ }
+		},
+		"users": [{"uuid": "uuid-1", "keys": ["sk-u1"]}]
+	}`
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatalf("带注释配置应解析成功: %v", err)
+	}
+	if c.UpstreamBase != "https://PROVIDER_HOST/v1" {
+		t.Errorf("URL 被注释剥离器误伤: %q", c.UpstreamBase)
+	}
+	if c.Pricing["mimo-v2.5"].Transformation != "openai_completions" {
+		t.Errorf("mimo transformation = %q", c.Pricing["mimo-v2.5"].Transformation)
+	}
+	if c.Pricing["deepseek-v4-flash"].Transformation != "" {
+		t.Errorf("flash transformation = %q", c.Pricing["deepseek-v4-flash"].Transformation)
+	}
+}
+
+// TestStripJSONCommentsStringSafety 验证字符串内的 // 与转义引号安全。
+func TestStripJSONCommentsStringSafety(t *testing.T) {
+	in := []byte(`{"a":"http://x/y","b":"line // not comment","c":"esc \" // still str"}`)
+	out := string(stripJSONComments(in))
+	if out != `{"a":"http://x/y","b":"line // not comment","c":"esc \" // still str"}` {
+		t.Errorf("字符串内注释被误删: %s", out)
+	}
+}

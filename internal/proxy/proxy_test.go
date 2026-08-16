@@ -1024,3 +1024,94 @@ func TestForwardOversizeBody413(t *testing.T) {
 		t.Fatalf("超大 body status = %d, want 413", resp.StatusCode)
 	}
 }
+
+// TestTransformSameFormatPassThrough 验证：客户端访问格式 == 模型 transformation（源头格式）时，
+// 与 transformation 为空完全一致——请求体原样（仅流式 usage 注入）、路径不变、响应原样，只替换 auth。
+func TestTransformSameFormatPassThrough(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	// mimo 的 transformation 设为 openai_completions，客户端也用 completions 访问 → 应透传
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Transformation = "openai_completions"
+		c.Pricing["mimo-v2.5"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"mimo-v2.5","messages":[{"role":"user","content":"hi"}],"temperature":0.14}`
+	st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, body)
+	if st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	// 请求体逐字节原样（非流式无注入）
+	if string(fu.lastBody) != body {
+		t.Errorf("同格式应原样透传请求体, got %s", fu.lastBody)
+	}
+	// 路径保持客户端原路径
+	if fu.lastPath != "/chat/completions" {
+		t.Errorf("路径应为 /chat/completions, got %q", fu.lastPath)
+	}
+	// 上游收到母 key（仅 auth 替换）
+	if fu.auth() != "Bearer "+testMaster {
+		t.Errorf("auth = %q", fu.auth())
+	}
+}
+
+// TestTransformSameFormatStreamInjectionOnly 验证：同格式流式仅做 usage 注入（与透传一致），不做协议转换。
+func TestTransformSameFormatStreamInjectionOnly(t *testing.T) {
+	fu := &fakeUpstream{stream: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Transformation = "openai_completions"
+		c.Pricing["mimo-v2.5"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"mimo-v2.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	st, respBody, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, body)
+	if st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	// 只注入 stream_options（透传行为），不转换为其他格式
+	if !strings.Contains(string(fu.lastBody), "include_usage") {
+		t.Error("应注入 include_usage")
+	}
+	// 响应是原始 OpenAI 流式格式（非 anthropic/responses）
+	if !strings.Contains(respBody, "[DONE]") || strings.Contains(respBody, "message_start") || strings.Contains(respBody, "response.created") {
+		t.Errorf("响应应为原 OpenAI 流式格式: %s", respBody)
+	}
+}
+
+// TestTransformNon2xxPassthrough 验证：转换模式下上游返回非 2xx 时，
+// 错误响应原样透传（不做协议转换），保留上游错误语义。
+func TestTransformNon2xxPassthrough(t *testing.T) {
+	fu := &fakeUpstream{status: 400}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Transformation = "openai_completions"
+		c.Pricing["mimo-v2.5"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 客户端 anthropic → 转换 → 上游返回 400（假上游的 400 body 是 chat.completion JSON）
+	// 响应必须原样透传该 body，而不是尝试解析/转换为 anthropic 格式
+	st, body, _ := doReq(t, srv, "POST", "/v1/messages", testUser1, `{"model":"mimo-v2.5","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if st != 400 {
+		t.Fatalf("status = %d, want 400", st)
+	}
+	// 假上游 400 body: {"id":"x","object":"chat.completion",...} —— 应原样出现，而非被转成 {"type":"message"...}
+	if !strings.Contains(body, "chat.completion") {
+		t.Errorf("非 2xx 响应应原样透传（上游 chat.completion 错误体），got: %s", body)
+	}
+	if strings.Contains(body, `"type":"message"`) {
+		t.Errorf("非 2xx 不应被转换为 anthropic 格式: %s", body)
+	}
+}
