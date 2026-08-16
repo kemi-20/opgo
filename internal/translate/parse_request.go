@@ -162,8 +162,10 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 		Reasoning *struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning"`
-		Instructions string   `json:"instructions"`
-		Include      []string `json:"include"`
+		Instructions     string          `json:"instructions"`
+		ToolChoice       json.RawMessage `json:"tool_choice"`
+		ParallelToolCalls *bool          `json:"parallel_tool_calls"`
+		Include          []string        `json:"include"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, errf("解析 openai_responses 请求失败: %w", err)
@@ -178,6 +180,10 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 	if obj.Reasoning != nil {
 		req.ReasoningEffort = obj.Reasoning.Effort
 	}
+	if len(obj.ToolChoice) > 0 && string(obj.ToolChoice) != "null" {
+		req.ToolChoice = json.RawMessage(obj.ToolChoice)
+	}
+	req.ParallelToolCalls = obj.ParallelToolCalls
 	for _, i := range obj.Include {
 		if i == "usage" {
 			req.IncludeUsage = true

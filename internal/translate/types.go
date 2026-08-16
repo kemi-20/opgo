@@ -93,6 +93,8 @@ type Request struct {
 	Tools           []Tool    `json:"tools,omitempty"`
 	IncludeUsage    bool      `json:"include_usage,omitempty"`
 	Instructions    string    `json:"instructions,omitempty"`
+	ToolChoice      any       `json:"tool_choice,omitempty"`      // "auto" | "none" | "required" | {"type":"function","name":...}
+	ParallelToolCalls *bool   `json:"parallel_tool_calls,omitempty"`
 }
 
 // ---------- 规范化响应模型 ----------

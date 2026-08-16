@@ -235,7 +235,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	}
 	// 请求体转换：源格式 → 目标格式
 	upstreamPath := stripV1Prefix(r.URL.Path)
+	var reqMeta *translate.Request
 	if transformEnabled {
+		reqMeta, _ = translate.ParseRequest(srcFormat, body)
 		nb, err := translate.ConvertRequest(srcFormat, dstFormat, body)
 		if err != nil {
 			p.log.Warn("请求协议转换失败", "err", err, "uuid", user.UUID, "model", model)
@@ -309,7 +311,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	}
 	// 仅 2xx 响应做协议转换；错误响应原样透传（保留上游错误语义与状态码）
 	if transformEnabled && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		nb, err := translate.ConvertResponse(srcFormat, dstFormat, respBody)
+		nb, err := translate.ConvertResponseMeta(reqMeta, srcFormat, dstFormat, respBody)
 		if err != nil {
 			p.log.Warn("响应协议转换失败", "err", err, "uuid", user.UUID, "model", model)
 			p.writeOpenAIError(w, http.StatusBadGateway, "translate_error", "响应协议转换失败")

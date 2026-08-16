@@ -1,23 +1,28 @@
 package translate
 
 // ConvertRequest 把客户端格式的请求体转换为目标格式的请求体。
+func ParseRequest(from Format, raw []byte) (*Request, error) {
+	switch from {
+	case FormatOpenAICompletions:
+		return parseOpenAICompletionsRequest(raw)
+	case FormatOpenAIResponses:
+		return parseOpenAIResponsesRequest(raw)
+	case FormatAnthropic:
+		return parseAnthropicRequest(raw)
+	default:
+		return nil, errf("unsupported request format: %s", from)
+	}
+}
+
 func ConvertRequest(from, to Format, raw []byte) ([]byte, error) {
 	if from == to {
 		return raw, nil
 	}
-	var req *Request
-	var err error
-	switch from {
-	case FormatOpenAICompletions:
-		req, err = parseOpenAICompletionsRequest(raw)
-	case FormatOpenAIResponses:
-		req, err = parseOpenAIResponsesRequest(raw)
-	case FormatAnthropic:
-		req, err = parseAnthropicRequest(raw)
-	default:
-		return raw, nil
-	}
+	req, err := ParseRequest(from, raw)
 	if err != nil {
+		return nil, err
+	}
+if err != nil {
 		return nil, err
 	}
 	// 计费必需：转换模式下强制请求 usage（上游响应需带 usage 才能按 token 计费）。
@@ -60,6 +65,38 @@ func ConvertResponse(to, from Format, raw []byte) ([]byte, error) {
 		return buildOpenAICompletionsResponse(resp)
 	case FormatOpenAIResponses:
 		return buildOpenAIResponsesResponse(resp)
+	case FormatAnthropic:
+		return buildAnthropicResponse(resp)
+	}
+	return raw, nil
+}
+
+// ConvertResponseMeta ͬ ConvertResponse�����������Ŀ���ʽ��Ӧʱ�ṩԭʼ����ġ�None
+// ��Ԫ�أ��Ա�ת��ʱ�ھ����Ŀ���ʽ�ϲ�ȫ�ֶ��루temperature/tools/tool_choice �ȣ���
+func ConvertResponseMeta(meta *Request, to, from Format, raw []byte) ([]byte, error) {
+	if to == from {
+		return raw, nil
+	}
+	var resp *Response
+	var err error
+	switch from {
+	case FormatOpenAICompletions:
+		resp, err = parseOpenAICompletionsResponse(raw)
+	case FormatOpenAIResponses:
+		resp, err = parseOpenAIResponsesResponse(raw)
+	case FormatAnthropic:
+		resp, err = parseAnthropicResponse(raw)
+	default:
+		return raw, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch to {
+	case FormatOpenAICompletions:
+		return buildOpenAICompletionsResponse(resp)
+	case FormatOpenAIResponses:
+		return buildOpenAIResponsesResponseMeta(resp, meta)
 	case FormatAnthropic:
 		return buildAnthropicResponse(resp)
 	}

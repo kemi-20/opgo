@@ -61,6 +61,7 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 				Role             string `json:"role"`
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
 				ToolCalls        []struct {
 					Index    *int `json:"index"`
 					ID       string `json:"id"`
@@ -89,6 +90,9 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 		d := obj.Choices[0].Delta
 		if d.ReasoningContent != "" {
 			events = append(events, StreamEvent{Kind: "reasoning", Reasoning: d.ReasoningContent})
+		} else if d.Reasoning != "" {
+			// 部分上游（如 mimo）思考字段为 delta.reasoning
+			events = append(events, StreamEvent{Kind: "reasoning", Reasoning: d.Reasoning})
 		}
 		if d.Content != "" {
 			events = append(events, StreamEvent{Kind: "text", Text: d.Content})

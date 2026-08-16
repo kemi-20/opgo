@@ -18,6 +18,7 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 				Role             string `json:"role"`
 				Content          any    `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
 				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Function struct {
@@ -49,7 +50,11 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 		if c.Message != nil {
 			rc.Role = c.Message.Role
 			rc.Text = textFromOpenAIContent(c.Message.Content)
-			rc.Reasoning = c.Message.ReasoningContent
+			if c.Message.ReasoningContent != "" {
+				rc.Reasoning = c.Message.ReasoningContent
+			} else {
+				rc.Reasoning = c.Message.Reasoning
+			}
 			for _, tc := range c.Message.ToolCalls {
 				rc.ToolCalls = append(rc.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 			}
@@ -305,12 +310,16 @@ func buildOpenAICompletionsResponse(resp *Response) ([]byte, error) {
 }
 
 func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
+	return buildOpenAIResponsesResponseMeta(resp, nil)
+}
+
+func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, error) {
 	output := make([]map[string]any, 0, 4)
-	// reasoning
+	// reasoning（对齐原生：status + content + summary）
 	if len(resp.Choices) > 0 && resp.Choices[0].Reasoning != "" {
 		output = append(output, map[string]any{
-			"type": "reasoning",
-			"id":   "rs_" + resp.ID,
+			"type": "reasoning", "id": "rs_" + resp.ID, "status": "completed",
+			"content": []map[string]any{{"type": "reasoning_text", "text": resp.Choices[0].Reasoning, "annotations": []any{}}},
 			"summary": []map[string]any{{"type": "summary_text", "text": resp.Choices[0].Reasoning, "annotations": []any{}}},
 		})
 	}
@@ -336,8 +345,53 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	}
 	out := map[string]any{
 		"id": orDefault(resp.ID, "resp_opgo"), "object": "response",
-		"created_at": resp.Created, "status": "completed",
-		"model": resp.Model, "output": output,
+		"created_at": resp.Created, "completed_at": resp.Created,
+		"status": "completed", "model": resp.Model, "output": output,
+		"parallel_tool_calls": true, "truncation": "disabled",
+		"top_logprobs": 0, "max_tool_calls": nil,
+		"error": nil, "incomplete_details": nil,
+		"previous_response_id": nil, "background": false,
+		"prompt_cache_retention": nil,
+		"temperature": 1, "top_p": 1,
+		"instructions": nil, "tool_choice": "auto",
+		"reasoning": map[string]any{"effort": nil, "summary": nil},
+		"text": map[string]any{"verbosity": nil, "format": map[string]any{"type": "text"}},
+		"moderation": nil, "cost": "0",
+	}
+	if meta != nil {
+		if meta.Temperature != nil {
+			out["temperature"] = *meta.Temperature
+		}
+		if meta.TopP != nil {
+			out["top_p"] = *meta.TopP
+		}
+		if meta.MaxTokens != nil {
+			out["max_output_tokens"] = *meta.MaxTokens
+		}
+		if meta.ParallelToolCalls != nil {
+			out["parallel_tool_calls"] = *meta.ParallelToolCalls
+		}
+		if meta.ToolChoice != nil {
+			out["tool_choice"] = meta.ToolChoice
+		}
+		if len(meta.Tools) > 0 {
+			tools := make([]map[string]any, 0, len(meta.Tools))
+			for _, t := range meta.Tools {
+				tools = append(tools, map[string]any{
+					"type": "function", "name": t.Name, "description": t.Description,
+					"parameters": t.Parameters,
+				})
+			}
+			out["tools"] = tools
+		}
+		if meta.Instructions != "" {
+			out["instructions"] = meta.Instructions
+		} else if len(meta.System) > 0 {
+			out["instructions"] = blocksToText(meta.System)
+		}
+		if meta.ReasoningEffort != "" {
+			out["reasoning"] = map[string]any{"effort": meta.ReasoningEffort, "summary": nil}
+		}
 	}
 	hasUsage := resp.Usage.TotalTokens > 0 || resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
 	if hasUsage {
@@ -413,4 +467,18 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// blocksToText 将 Block 列表拼接为纯文本（用于 instructions 字段回填）。
+func blocksToText(blocks []Block) string {
+	var b strings.Builder
+	for _, blk := range blocks {
+		if blk.Text != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(blk.Text)
+		}
+	}
+	return b.String()
 }
