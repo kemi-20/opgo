@@ -317,7 +317,7 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	for _, c := range resp.Choices {
 		if c.Text != "" || len(c.ToolCalls) == 0 {
 			msg := map[string]any{
-				"type": "message", "id": "msg_" + resp.ID, "role": "assistant",
+				"type": "message", "id": "msg_" + resp.ID, "status": "completed", "role": "assistant", "phase": "final_answer",
 				"content": []map[string]any{{"type": "output_text", "text": c.Text, "annotations": []any{}}},
 			}
 			output = append(output, msg)

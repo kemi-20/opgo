@@ -59,6 +59,70 @@ func TestStreamCompletionsToResponsesCodexCompat(t *testing.T) {
 	if addedStatus["function_call"] != true {
 		t.Errorf("function_call output_item.added missing status:in_progress, got %v", addedStatus)
 	}
+	// 对齐原生格式：所有事件必须带递增 sequence_number（OpenAI Responses 流式协议字段）
+	seqs := []int64{}
+	for _, b := range all {
+		line := string(b)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			continue
+		}
+		if sn, ok := ev["sequence_number"].(float64); ok {
+			seqs = append(seqs, int64(sn))
+		}
+	}
+	if len(seqs) == 0 {
+		t.Errorf("no event carries sequence_number")
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] != seqs[i-1]+1 {
+			t.Errorf("sequence_number not monotonic: %v", seqs)
+			break
+		}
+	}
+	if seqs[0] != 0 {
+		t.Errorf("sequence_number should start at 0, got %d", seqs[0])
+	}
+
+	// 对齐原生格式：response.completed 必须带完整 output 数组（含 function_call）
+	var completedOutput []any
+	hasOutput := false
+	for _, b := range all {
+		line := string(b)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			continue
+		}
+		if ev["type"] == "response.completed" {
+			if resp, ok := ev["response"].(map[string]any); ok {
+				if o, ok2 := resp["output"]; ok2 {
+					hasOutput = true
+					completedOutput, _ = o.([]any)
+				}
+			}
+		}
+	}
+	if !hasOutput {
+		t.Errorf("response.completed missing output array (Codex needs it to continue tool loop)")
+	}
+	foundFC := false
+	for _, item := range completedOutput {
+		if m, ok := item.(map[string]any); ok && m["type"] == "function_call" {
+			foundFC = true
+			if m["name"] != "get_weather" || m["arguments"] != "{\"city\": \"Beijing\"}" {
+				t.Errorf("completed.output function_call mismatch: %v", m)
+			}
+		}
+	}
+	if !foundFC {
+		t.Errorf("completed.output missing function_call item: %v", completedOutput)
+	}
 	// 打印全部事件便于核对
 	for _, b := range all {
 		t.Logf("EVT: %s", strings.TrimSpace(string(b)))

@@ -452,14 +452,24 @@ type responsesStreamWriter struct {
 	outputIndex  int
 	toolName     string
 	textAccum    string
+	reasonAccum  string
 	argsAccum    string
 	completed    bool
 	finishSeen   bool
 	pendingUsage *Usage
+	outputItems  []map[string]any // 对齐原生 response.completed.output
+	seq          int              // OpenAI Responses 流式协议：每个事件递增的 sequence_number
 }
 
 func newResponsesStreamWriter() *responsesStreamWriter {
 	return &responsesStreamWriter{}
+}
+
+// nextSeq 返回当前 sequence_number 并递增（对齐原生流式协议）。
+func (w *responsesStreamWriter) nextSeq() int {
+	s := w.seq
+	w.seq++
+	return s
 }
 
 // begin 输出 response.created / response.in_progress（每个流只一次）。
@@ -469,12 +479,12 @@ func (w *responsesStreamWriter) ensureStarted(model string, out *[][]byte) {
 	}
 	w.started = true
 	created, _ := json.Marshal(map[string]any{
-		"type": "response.created",
+		"type": "response.created", "sequence_number": w.nextSeq(),
 		"response": map[string]any{"id": "resp_1", "object": "response", "status": "in_progress", "model": model},
 	})
 	*out = append(*out, sseData(created))
 	prog, _ := json.Marshal(map[string]any{
-		"type": "response.in_progress",
+		"type": "response.in_progress", "sequence_number": w.nextSeq(),
 		"response": map[string]any{"id": "resp_1", "object": "response", "status": "in_progress", "model": model},
 	})
 	*out = append(*out, sseData(prog))
@@ -483,16 +493,17 @@ func (w *responsesStreamWriter) ensureStarted(model string, out *[][]byte) {
 // beginReasoning 声明 reasoning item + content part。
 func (w *responsesStreamWriter) beginReasoning(out *[][]byte) {
 	w.blockType = "reasoning"
+	w.reasonAccum = ""
 	w.itemID = "rs_" + strconv.Itoa(w.nextIndex)
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex,
+		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"item": map[string]any{"id": w.itemID, "type": "reasoning", "summary": []any{}},
 	})
 	*out = append(*out, sseData(item))
 	part, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex,
+		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"part": map[string]any{"type": "summary_text", "text": "", "annotations": []any{}},
 	})
 	*out = append(*out, sseData(part))
@@ -500,19 +511,21 @@ func (w *responsesStreamWriter) beginReasoning(out *[][]byte) {
 
 func (w *responsesStreamWriter) endReasoning(out *[][]byte) {
 	done, _ := json.Marshal(map[string]any{
-		"type": "response.reasoning_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": "",
+		"type": "response.reasoning_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": "", "sequence_number": w.nextSeq(),
 	})
 	*out = append(*out, sseData(done))
 	cd, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex,
+		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"part": map[string]any{"type": "summary_text", "text": "", "annotations": []any{}},
 	})
 	*out = append(*out, sseData(cd))
+	item := map[string]any{"id": w.itemID, "type": "reasoning", "status": "completed", "content": []map[string]any{{"type": "reasoning_text", "text": w.reasonAccum}}, "summary": []any{}}
 	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex,
-		"item": map[string]any{"id": w.itemID, "type": "reasoning", "summary": []any{}},
+		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
+		"item": item,
 	})
 	*out = append(*out, sseData(oid))
+	w.outputItems = append(w.outputItems, item)
 }
 
 func (w *responsesStreamWriter) beginText(out *[][]byte) {
@@ -522,12 +535,12 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 	w.nextIndex++
 	w.textAccum = ""
 	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex,
+		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []any{}},
 	})
 	*out = append(*out, sseData(item))
 	part, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex,
+		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 	})
 	*out = append(*out, sseData(part))
@@ -535,19 +548,21 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 
 func (w *responsesStreamWriter) endText(out *[][]byte) {
 	done, _ := json.Marshal(map[string]any{
-		"type": "response.output_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": w.textAccum,
+		"type": "response.output_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": w.textAccum, "sequence_number": w.nextSeq(),
 	})
 	*out = append(*out, sseData(done))
 	cd, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex,
+		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"part": map[string]any{"type": "output_text", "text": w.textAccum, "annotations": []any{}},
 	})
 	*out = append(*out, sseData(cd))
+	item := map[string]any{"id": w.itemID, "type": "message", "status": "completed", "role": "assistant", "phase": "final_answer", "content": []map[string]any{{"type": "output_text", "text": w.textAccum, "annotations": []any{}}}}
 	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex,
-		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": w.textAccum, "annotations": []any{}}}},
+		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
+		"item": item,
 	})
 	*out = append(*out, sseData(oid))
+	w.outputItems = append(w.outputItems, item)
 }
 
 func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
@@ -562,7 +577,7 @@ func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.nextIndex++
 	w.argsAccum = ""
 	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex,
+		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"item": map[string]any{"id": id, "type": "function_call", "status": "in_progress", "call_id": id, "name": ev.ToolName, "arguments": ""},
 	})
 	*out = append(*out, sseData(item))
@@ -574,16 +589,18 @@ func (w *responsesStreamWriter) endTool(out *[][]byte) {
 		argsStr = "{}"
 	}
 	done, _ := json.Marshal(map[string]any{
-		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex,
+		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"call_id": w.itemID, "name": w.toolName, "arguments": argsStr,
 	})
 	*out = append(*out, sseData(done))
 	// 注意：AI SDK 对 output_item.done 的 function_call 校验要求 arguments 为字符串
+	item := map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.itemID, "name": w.toolName, "arguments": argsStr, "status": "completed"}
 	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex,
-		"item": map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.itemID, "name": w.toolName, "arguments": argsStr, "status": "completed"},
+		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
+		"item": item,
 	})
 	*out = append(*out, sseData(oid))
+	w.outputItems = append(w.outputItems, item)
 }
 
 // endBlock 闭合当前活动块（按类型输出 done 序列）。
@@ -607,12 +624,12 @@ func (w *responsesStreamWriter) emitCompleted(model string, out *[][]byte) {
 		return
 	}
 	w.completed = true
-	respMap := map[string]any{"id": "resp_1", "object": "response", "status": "completed", "model": model}
+	respMap := map[string]any{"id": "resp_1", "object": "response", "status": "completed", "model": model, "output": w.outputItems}
 	if w.pendingUsage != nil {
 		respMap["usage"] = usageMap(w.pendingUsage)
 		w.pendingUsage = nil
 	}
-	evt, _ := json.Marshal(map[string]any{"type": "response.completed", "response": respMap})
+	evt, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": w.nextSeq(), "response": respMap})
 	*out = append(*out, sseData(evt))
 }
 
@@ -637,8 +654,9 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			}
 			w.beginReasoning(&out)
 		}
+		w.reasonAccum += ev.Reasoning
 		evt, _ := json.Marshal(map[string]any{
-			"type": "response.reasoning_text.delta", "item_id": w.itemID, "output_index": w.outputIndex,
+			"type": "response.reasoning_text.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 			"delta": ev.Reasoning,
 		})
 		out = append(out, sseData(evt))
@@ -651,7 +669,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		}
 		w.textAccum += ev.Text
 		evt, _ := json.Marshal(map[string]any{
-			"type": "response.output_text.delta", "item_id": w.itemID, "output_index": w.outputIndex,
+			"type": "response.output_text.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 			"delta": ev.Text,
 		})
 		out = append(out, sseData(evt))
@@ -669,7 +687,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		}
 		w.argsAccum += ev.Args
 		evt, _ := json.Marshal(map[string]any{
-			"type": "response.function_call_arguments.delta", "item_id": w.itemID, "output_index": w.outputIndex,
+			"type": "response.function_call_arguments.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 			"call_id": w.itemID, "delta": ev.Args,
 		})
 		out = append(out, sseData(evt))
@@ -697,7 +715,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		}
 		w.emitCompleted(model, &out)
 	case "error":
-		evt, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"message": ev.Error}})
+		evt, _ := json.Marshal(map[string]any{"type": "error", "sequence_number": w.nextSeq(), "error": map[string]any{"message": ev.Error}})
 		out = append(out, sseData(evt))
 	}
 	return out
