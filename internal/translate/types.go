@@ -237,6 +237,20 @@ func parseTextOrBlocks(v any) []Block {
 				id, _ := m["tool_use_id"].(string)
 				content, _ := json.Marshal(m["content"])
 				out = append(out, Block{Type: "tool_result", ToolUseID: id, Content: content})
+			case "function_call":
+				// OpenAI Responses 工具调用
+				id, _ := m["call_id"].(string)
+				if id == "" {
+					id, _ = m["id"].(string)
+				}
+				name, _ := m["name"].(string)
+				args, _ := json.Marshal(m["arguments"])
+				out = append(out, Block{Type: "tool_use", ToolUseID: id, Name: name, Input: args})
+			case "function_call_output":
+				// OpenAI Responses 工具结果
+				id, _ := m["call_id"].(string)
+				content, _ := json.Marshal(m["output"])
+				out = append(out, Block{Type: "tool_result", ToolUseID: id, Content: content})
 			case "refusal":
 				text, _ := m["refusal"].(string)
 				out = append(out, Block{Type: "text", Text: text})

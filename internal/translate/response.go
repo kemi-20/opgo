@@ -323,13 +323,13 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 			output = append(output, msg)
 		}
 		for _, tc := range c.ToolCalls {
-			var argsVal any = map[string]any{}
-			if tc.Arguments != "" {
-				_ = json.Unmarshal([]byte(tc.Arguments), &argsVal)
+			argsStr := tc.Arguments
+			if argsStr == "" {
+				argsStr = "{}"
 			}
 			output = append(output, map[string]any{
 				"type": "function_call", "id": tc.ID, "call_id": tc.ID,
-				"name": tc.Name, "arguments": argsVal,
+				"name": tc.Name, "arguments": argsStr,
 			})
 		}
 	}

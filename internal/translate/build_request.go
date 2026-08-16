@@ -84,6 +84,23 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 			if len(toolCalls) > 0 {
 				mm["tool_calls"] = toolCalls
 			}
+		case "user":
+			// OpenAI 历史中工具结果（function_call_output / tool_result 块）必须转为独立的
+			// role=tool 消息，否则上游模型认为工具未执行。
+			if len(m.Content) > 0 && hasToolResultBlock(m.Content) {
+				for _, b := range m.Content {
+					if b.Type == "tool_result" {
+						mm2 := map[string]any{"role": "tool", "tool_call_id": b.ToolUseID, "content": rawToText(b.Content)}
+						msgs = append(msgs, mm2)
+					}
+				}
+				// 该 user 消息仅承载工具结果，不再单独输出（避免空 content 消息）
+				continue
+			} else if len(m.Content) > 0 {
+				mm["content"] = blocksToOpenAIContent(m.Content)
+			} else {
+				mm["content"] = m.Text
+			}
 		default:
 			if len(m.Content) > 0 {
 				mm["content"] = blocksToOpenAIContent(m.Content)
@@ -117,6 +134,15 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 		out["stream_options"] = map[string]any{"include_usage": true}
 	}
 	return json.Marshal(out)
+}
+
+func hasToolResultBlock(blocks []Block) bool {
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 func blocksToOpenAIContent(blocks []Block) any {

@@ -450,6 +450,9 @@ type responsesStreamWriter struct {
 	blockType    string // "" | "reasoning" | "text" | "tool"
 	itemID       string
 	outputIndex  int
+	toolName     string
+	textAccum    string
+	argsAccum    string
 	completed    bool
 	pendingUsage *Usage
 }
@@ -516,6 +519,7 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 	w.itemID = "msg_" + strconv.Itoa(w.nextIndex)
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
+	w.textAccum = ""
 	item, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.added", "output_index": w.outputIndex,
 		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []any{}},
@@ -530,17 +534,17 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 
 func (w *responsesStreamWriter) endText(out *[][]byte) {
 	done, _ := json.Marshal(map[string]any{
-		"type": "response.output_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": "",
+		"type": "response.output_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": w.textAccum,
 	})
 	*out = append(*out, sseData(done))
 	cd, _ := json.Marshal(map[string]any{
 		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex,
-		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		"part": map[string]any{"type": "output_text", "text": w.textAccum, "annotations": []any{}},
 	})
 	*out = append(*out, sseData(cd))
 	oid, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.done", "output_index": w.outputIndex,
-		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []any{}},
+		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": w.textAccum, "annotations": []any{}}}},
 	})
 	*out = append(*out, sseData(oid))
 }
@@ -552,8 +556,10 @@ func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 		id = "fc_" + ev.ToolName
 	}
 	w.itemID = id
+	w.toolName = ev.ToolName
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
+	w.argsAccum = ""
 	item, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.added", "output_index": w.outputIndex,
 		"item": map[string]any{"id": id, "type": "function_call", "call_id": id, "name": ev.ToolName, "arguments": ""},
@@ -562,13 +568,19 @@ func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 }
 
 func (w *responsesStreamWriter) endTool(out *[][]byte) {
+	argsStr := w.argsAccum
+	if argsStr == "" {
+		argsStr = "{}"
+	}
 	done, _ := json.Marshal(map[string]any{
-		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex, "arguments": "",
+		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex,
+		"call_id": w.itemID, "name": w.toolName, "arguments": argsStr,
 	})
 	*out = append(*out, sseData(done))
+	// 注意：AI SDK 对 output_item.done 的 function_call 校验要求 arguments 为字符串
 	oid, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.done", "output_index": w.outputIndex,
-		"item": map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.itemID, "name": "", "arguments": ""},
+		"item": map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.itemID, "name": w.toolName, "arguments": argsStr, "status": "completed"},
 	})
 	*out = append(*out, sseData(oid))
 }
@@ -636,6 +648,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			}
 			w.beginText(&out)
 		}
+		w.textAccum += ev.Text
 		evt, _ := json.Marshal(map[string]any{
 			"type": "response.output_text.delta", "item_id": w.itemID, "output_index": w.outputIndex,
 			"delta": ev.Text,
@@ -653,9 +666,10 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			}
 			w.beginTool(ev, &out)
 		}
+		w.argsAccum += ev.Args
 		evt, _ := json.Marshal(map[string]any{
 			"type": "response.function_call_arguments.delta", "item_id": w.itemID, "output_index": w.outputIndex,
-			"delta": ev.Args,
+			"call_id": w.itemID, "delta": ev.Args,
 		})
 		out = append(out, sseData(evt))
 	case "end_block":
