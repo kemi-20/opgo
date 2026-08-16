@@ -311,14 +311,14 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 		output = append(output, map[string]any{
 			"type": "reasoning",
 			"id":   "rs_" + resp.ID,
-			"summary": []map[string]any{{"type": "summary_text", "text": resp.Choices[0].Reasoning}},
+			"summary": []map[string]any{{"type": "summary_text", "text": resp.Choices[0].Reasoning, "annotations": []any{}}},
 		})
 	}
 	for _, c := range resp.Choices {
 		if c.Text != "" || len(c.ToolCalls) == 0 {
 			msg := map[string]any{
 				"type": "message", "id": "msg_" + resp.ID, "role": "assistant",
-				"content": []map[string]any{{"type": "output_text", "text": c.Text}},
+				"content": []map[string]any{{"type": "output_text", "text": c.Text, "annotations": []any{}}},
 			}
 			output = append(output, msg)
 		}
@@ -360,7 +360,7 @@ func buildAnthropicResponse(resp *Response) ([]byte, error) {
 		c := resp.Choices[0]
 		stopReason = mapOpenAIStopToAnthropic(c.FinishReason)
 		if c.Reasoning != "" {
-			content = append(content, map[string]any{"type": "thinking", "thinking": c.Reasoning})
+			content = append(content, map[string]any{"type": "thinking", "thinking": c.Reasoning, "signature": ""})
 		}
 		if c.Text != "" {
 			content = append(content, map[string]any{"type": "text", "text": c.Text})
