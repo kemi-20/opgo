@@ -3,7 +3,8 @@ package translate
 import (
 	"encoding/json"
 	"strings"
-)
+
+	"github.com/google/uuid")
 
 // ---------- OpenAI chat/completions 非流式响应解析 ----------
 
@@ -336,8 +337,9 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 			if argsStr == "" {
 				argsStr = "{}"
 			}
+			// item id 用独立 UUID，call_id 保留上游工具调用 ID（对齐原生 responses）
 			output = append(output, map[string]any{
-				"type": "function_call", "id": tc.ID, "call_id": tc.ID,
+				"type": "function_call", "id": uuid.NewString(), "call_id": tc.ID,
 				"status": "completed",
 				"name": tc.Name, "arguments": argsStr,
 			})

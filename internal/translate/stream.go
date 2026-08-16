@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"github.com/google/uuid"
 	"bytes"
 	"encoding/json"
 	"strconv"
@@ -453,6 +454,7 @@ type responsesStreamWriter struct {
 	// 当前活动块
 	blockType    string // "" | "reasoning" | "text" | "tool"
 	itemID       string
+	toolCallID   string
 	outputIndex  int
 	toolName     string
 	textAccum    string
@@ -571,18 +573,21 @@ func (w *responsesStreamWriter) endText(out *[][]byte) {
 
 func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.blockType = "tool"
-	id := ev.ToolID
-	if id == "" {
-		id = "fc_" + ev.ToolName
+	// item id 必须是独立 UUID（对齐原生 responses：id 与 call_id 不同），
+	// call_id 保留上游工具调用 ID（call_xxx），Codex 依赖两者区分。
+	callID := ev.ToolID
+	if callID == "" {
+		callID = "fc_" + ev.ToolName
 	}
-	w.itemID = id
+	w.itemID = uuid.NewString()
+	w.toolCallID = callID
 	w.toolName = ev.ToolName
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	w.argsAccum = ""
 	item, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": map[string]any{"id": id, "type": "function_call", "status": "in_progress", "call_id": id, "name": ev.ToolName, "arguments": ""},
+		"item": map[string]any{"id": w.itemID, "type": "function_call", "status": "in_progress", "call_id": callID, "name": ev.ToolName, "arguments": ""},
 	})
 	*out = append(*out, sseData(item))
 }
@@ -594,11 +599,11 @@ func (w *responsesStreamWriter) endTool(out *[][]byte) {
 	}
 	done, _ := json.Marshal(map[string]any{
 		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"call_id": w.itemID, "name": w.toolName, "arguments": argsStr,
+		"call_id": w.toolCallID, "name": w.toolName, "arguments": argsStr,
 	})
 	*out = append(*out, sseData(done))
 	// 注意：AI SDK 对 output_item.done 的 function_call 校验要求 arguments 为字符串
-	item := map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.itemID, "name": w.toolName, "arguments": argsStr, "status": "completed"}
+	item := map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.toolCallID, "name": w.toolName, "arguments": argsStr, "status": "completed"}
 	oid, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
 		"item": item,
@@ -692,7 +697,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		w.argsAccum += ev.Args
 		evt, _ := json.Marshal(map[string]any{
 			"type": "response.function_call_arguments.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-			"call_id": w.itemID, "delta": ev.Args,
+			"call_id": w.toolCallID, "delta": ev.Args,
 		})
 		out = append(out, sseData(evt))
 	case "end_block":
