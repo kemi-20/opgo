@@ -8,15 +8,15 @@ import (
 
 func parseOpenAICompletionsRequest(raw []byte) (*Request, error) {
 	var obj struct {
-		Model           string           `json:"model"`
-		Stream          bool             `json:"stream"`
-		MaxTokens       *int             `json:"max_tokens"`
-		MaxCompletion   *int             `json:"max_completion_tokens"`
-		Temperature     *float64         `json:"temperature"`
-		TopP            *float64         `json:"top_p"`
-		Stop            json.RawMessage  `json:"stop"`
-		Messages        []map[string]any `json:"messages"`
-		Tools           []struct {
+		Model         string           `json:"model"`
+		Stream        bool             `json:"stream"`
+		MaxTokens     *int             `json:"max_tokens"`
+		MaxCompletion *int             `json:"max_completion_tokens"`
+		Temperature   *float64         `json:"temperature"`
+		TopP          *float64         `json:"top_p"`
+		Stop          json.RawMessage  `json:"stop"`
+		Messages      []map[string]any `json:"messages"`
+		Tools         []struct {
 			Type     string `json:"type"`
 			Function *struct {
 				Name        string          `json:"name"`
@@ -147,13 +147,13 @@ func extractSystem(msgs []Message) ([]Message, []Block) {
 
 func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 	var obj struct {
-		Model        string          `json:"model"`
-		Stream       bool            `json:"stream"`
-		MaxOutput    *int            `json:"max_output_tokens"`
-		Temperature  *float64        `json:"temperature"`
-		TopP         *float64        `json:"top_p"`
-		Input        json.RawMessage `json:"input"`
-		Tools        []struct {
+		Model       string          `json:"model"`
+		Stream      bool            `json:"stream"`
+		MaxOutput   *int            `json:"max_output_tokens"`
+		Temperature *float64        `json:"temperature"`
+		TopP        *float64        `json:"top_p"`
+		Input       json.RawMessage `json:"input"`
+		Tools       []struct {
 			Type        string          `json:"type"`
 			Name        string          `json:"name"`
 			Description string          `json:"description"`
@@ -206,10 +206,48 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 				}
 				continue
 			}
-			msg := Message{Role: role}
-			if msg.Role == "" {
-				msg.Role = "user"
+			// OpenAI Responses 会话历史允许顶层裸项（无 role）：
+			// {"type":"function_call","call_id":...,"name":...,"arguments":...} 与
+			// {"type":"function_call_output","call_id":...,"output":...}。
+			// 必须转成 assistant(tool_use) / tool(tool_result) 消息，否则工具历史丢失，
+			// 上游会重复调用同一个工具（表现为"只调工具不输出/死循环"）。
+			if role == "" {
+				switch m["type"] {
+				case "function_call":
+					callID, _ := m["call_id"].(string)
+					if callID == "" {
+						callID, _ = m["id"].(string)
+					}
+					name, _ := m["name"].(string)
+					var argsRaw json.RawMessage
+					if s, ok := m["arguments"].(string); ok {
+						// arguments 是 JSON 字符串字面量（如 {"command":"echo hello"}），
+						// 直接作为原始字节，避免外层再加引号。
+						argsRaw = json.RawMessage(s)
+					} else {
+						argsRaw, _ = json.Marshal(m["arguments"])
+					}
+					block := Block{Type: "tool_use", ToolUseID: callID, Name: name, Input: argsRaw}
+					// 连续的工具调用合并到同一条 assistant 消息（并行调用）。
+					if n := len(req.Messages); n > 0 && req.Messages[n-1].Role == "assistant" && allToolUse(req.Messages[n-1].Content) {
+						req.Messages[n-1].Content = append(req.Messages[n-1].Content, block)
+					} else {
+						req.Messages = append(req.Messages, Message{Role: "assistant", Content: []Block{block}})
+					}
+				case "function_call_output":
+					callID, _ := m["call_id"].(string)
+					output := ""
+					if s, ok := m["output"].(string); ok {
+						output = s
+					} else {
+						b, _ := json.Marshal(m["output"])
+						output = string(b)
+					}
+					req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: callID, Text: output})
+				}
+				continue
 			}
+			msg := Message{Role: role}
 			if c, ok := m["content"]; ok {
 				msg.Content = parseTextOrBlocks(c)
 			}
@@ -223,6 +261,19 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 		}
 	}
 	return req, nil
+}
+
+// allToolUse 判断消息内容是否全部为工具调用块（用于合并连续 function_call 裸项）。
+func allToolUse(blocks []Block) bool {
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type != "tool_use" {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------- Anthropic 请求解析 ----------

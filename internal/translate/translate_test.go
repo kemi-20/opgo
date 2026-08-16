@@ -313,7 +313,11 @@ func TestStreamAnthropicToCompletions(t *testing.T) {
 }
 
 func TestParseFormat(t *testing.T) {
-	for _, tc := range []struct{ in string; want Format; ok bool }{
+	for _, tc := range []struct {
+		in   string
+		want Format
+		ok   bool
+	}{
 		{"", "", false},
 		{"false", "", false},
 		{"0", "", false},
@@ -330,7 +334,11 @@ func TestParseFormat(t *testing.T) {
 }
 
 func TestDetectFormat(t *testing.T) {
-	for _, tc := range []struct{ path string; want Format; ok bool }{
+	for _, tc := range []struct {
+		path string
+		want Format
+		ok   bool
+	}{
 		{"/v1/chat/completions", FormatOpenAICompletions, true},
 		{"/v1/responses", FormatOpenAIResponses, true},
 		{"/v1/messages", FormatAnthropic, true},
@@ -526,5 +534,106 @@ func TestConvertRequestForcesIncludeUsage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("→responses 应注入 include:[\"usage\"]: %s", out2)
+	}
+}
+
+// TestParseResponsesTopLevelToolItems 验证：Responses 历史中的顶层裸项
+// function_call / function_call_output（opencode/Codex 使用 @ai-sdk/openai 发送的格式）
+// 必须转换为 assistant(tool_use) / tool(tool_result) 消息，不能丢失。
+func TestParseResponsesTopLevelToolItems(t *testing.T) {
+	raw := []byte(`{"model":"mimo-v2.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"command\":\"echo hello\"}"},{"type":"function_call_output","call_id":"call_1","output":"hello\r\n"},{"type":"function_call","call_id":"call_2","name":"bash","arguments":"{\"command\":\"echo world\"}"},{"type":"function_call_output","call_id":"call_2","output":"world\r\n"}],"stream":true}`)
+	req, err := parseOpenAIResponsesRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 5 {
+		t.Fatalf("messages = %d, want 5 (user/assistant/tool/assistant/tool)", len(req.Messages))
+	}
+	m1 := req.Messages[1]
+	if m1.Role != "assistant" || len(m1.Content) != 1 || m1.Content[0].Type != "tool_use" {
+		t.Fatalf("messages[1] = %+v, want assistant tool_use", m1)
+	}
+	if m1.Content[0].ToolUseID != "call_1" || m1.Content[0].Name != "bash" {
+		t.Fatalf("tool_use = %+v", m1.Content[0])
+	}
+	if got := string(m1.Content[0].Input); got != `{"command":"echo hello"}` {
+		t.Fatalf("tool_use input = %q, want 原始 JSON 字符串", got)
+	}
+	m2 := req.Messages[2]
+	if m2.Role != "tool" || m2.ToolCallID != "call_1" || m2.Text != "hello\r\n" {
+		t.Fatalf("messages[2] = %+v, want tool result", m2)
+	}
+	m3 := req.Messages[3]
+	if m3.Role != "assistant" || len(m3.Content) != 1 || m3.Content[0].ToolUseID != "call_2" {
+		t.Fatalf("messages[3] = %+v, want assistant call_2", m3)
+	}
+}
+
+// TestParseResponsesParallelToolCallsMerged 验证：连续的 function_call 顶层裸项合并为一条 assistant 消息。
+func TestParseResponsesParallelToolCallsMerged(t *testing.T) {
+	raw := []byte(`{"model":"mimo-v2.5","input":[{"type":"function_call","call_id":"call_1","name":"bash","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"read","arguments":"{\"file_path\":\"a.txt\"}"},{"type":"function_call_output","call_id":"call_1","output":"ok"},{"type":"function_call_output","call_id":"call_2","output":"content"}],"stream":true}`)
+	req, err := parseOpenAIResponsesRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (assistant with 2 tool_use + 2 tool)", len(req.Messages))
+	}
+	m0 := req.Messages[0]
+	if m0.Role != "assistant" || len(m0.Content) != 2 {
+		t.Fatalf("messages[0] = %+v, want assistant with 2 tool_use", m0)
+	}
+	if m0.Content[0].ToolUseID != "call_1" || m0.Content[1].ToolUseID != "call_2" {
+		t.Fatalf("tool_use ids = %s,%s", m0.Content[0].ToolUseID, m0.Content[1].ToolUseID)
+	}
+	if req.Messages[1].Role != "tool" || req.Messages[1].ToolCallID != "call_1" {
+		t.Fatalf("messages[1] = %+v", req.Messages[1])
+	}
+	if req.Messages[2].Role != "tool" || req.Messages[2].ToolCallID != "call_2" {
+		t.Fatalf("messages[2] = %+v", req.Messages[2])
+	}
+}
+
+// TestConvertResponsesTopLevelToolItemsToCompletions 验证：转换后的 chat.completions
+// 请求包含完整的 tool_calls 与 tool 消息，且 arguments 不带多余引号。
+func TestConvertResponsesTopLevelToolItemsToCompletions(t *testing.T) {
+	raw := []byte(`{"model":"mimo-v2.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"command\":\"echo hello\"}"},{"type":"function_call_output","call_id":"call_1","output":"hello"}],"stream":true}`)
+	out, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAICompletions, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			Content    any    `json:"content"`
+			ToolCalls  []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("转换结果不是合法 JSON: %v\n%s", err, out)
+	}
+	if len(obj.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3: %s", len(obj.Messages), out)
+	}
+	as := obj.Messages[1]
+	if as.Role != "assistant" || len(as.ToolCalls) != 1 {
+		t.Fatalf("messages[1] = %+v, want assistant tool_calls", as)
+	}
+	if got := as.ToolCalls[0].Function.Arguments; got != `{"command":"echo hello"}` {
+		t.Fatalf("arguments = %q, want 原始 JSON 不带多余引号", got)
+	}
+	tm := obj.Messages[2]
+	if tm.Role != "tool" || tm.ToolCallID != "call_1" {
+		t.Fatalf("messages[2] = %+v, want tool result", tm)
+	}
+	if got, _ := tm.Content.(string); got != "hello" {
+		t.Fatalf("tool content = %#v, want hello", tm.Content)
 	}
 }
