@@ -39,7 +39,8 @@ func testConfigJSON(upstream string) string {
 			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
 			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
 			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
-			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000}
+			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000},
+			"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -387,7 +388,7 @@ func TestModelsList(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 4 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" {
+	if len(obj.Data) != 5 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" || obj.Data[4].ID != "hy3" {
 		t.Errorf("models = %+v", obj.Data)
 	}
 	wantCtx := map[string]int64{
@@ -395,12 +396,14 @@ func TestModelsList(t *testing.T) {
 		"deepseek-v4-pro":   1000000,
 		"mimo-v2.5":         1000000,
 		"gpt-5.6-luna":      1050000,
+		"hy3":               256000,
 	}
 	wantMax := map[string]int64{
 		"deepseek-v4-flash": 384000,
 		"deepseek-v4-pro":   384000,
 		"mimo-v2.5":         128000,
 		"gpt-5.6-luna":      128000,
+		"hy3":               64000,
 	}
 	for i, m := range obj.Data {
 		if w, ok := wantCtx[m.ID]; !ok || m.ContextLength != w {
@@ -786,7 +789,7 @@ func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 4 {
+	if len(obj.Data) != 5 {
 		t.Errorf("models = %+v", obj.Data)
 	}
 }

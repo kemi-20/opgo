@@ -329,6 +329,7 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 			}
 			output = append(output, map[string]any{
 				"type": "function_call", "id": tc.ID, "call_id": tc.ID,
+				"status": "completed",
 				"name": tc.Name, "arguments": argsStr,
 			})
 		}

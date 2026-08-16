@@ -4,7 +4,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna 定价）
+- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 总池保护：以上游实时余量接口为准，额度用尽即 429
 - 流式请求照常计费（自动注入 include_usage，兼容 OpenAI / Anthropic 协议）
@@ -97,6 +97,7 @@ go build -o opgo.exe .
 | deepseek-v4-flash / deepseek-v4-pro | `text->text`（默认） |
 | mimo-v2.5 | `text+image+audio+video->text` |
 | gpt-5.6-luna | `text+image->text` |
+| hy3 | `text->text`（纯文本） |
 
 `GET /v1/models` 会把 modality 自动拆为三个字段返回：
 
@@ -143,6 +144,7 @@ go build -o opgo.exe .
 |---|---|---|
 | deepseek-v4-flash / deepseek-v4-pro | （留空透传） | 上游原生端点完整，直接透传只替换认证 |
 | mimo-v2.5 | `openai_completions` | 上游只有 chat/completions 完整（Responses 不稳定、messages 无思考），统一转 completions |
+| hy3 | `openai_completions` | 统一转 chat/completions 发上游（与 mimo 同策略） |
 | gpt-5.6-luna | `openai_responses` | 上游原生支持 Responses（含 web_search），统一转 responses |
 
 客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。

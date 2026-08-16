@@ -454,6 +454,7 @@ type responsesStreamWriter struct {
 	textAccum    string
 	argsAccum    string
 	completed    bool
+	finishSeen   bool
 	pendingUsage *Usage
 }
 
@@ -562,7 +563,7 @@ func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.argsAccum = ""
 	item, _ := json.Marshal(map[string]any{
 		"type": "response.output_item.added", "output_index": w.outputIndex,
-		"item": map[string]any{"id": id, "type": "function_call", "call_id": id, "name": ev.ToolName, "arguments": ""},
+		"item": map[string]any{"id": id, "type": "function_call", "status": "in_progress", "call_id": id, "name": ev.ToolName, "arguments": ""},
 	})
 	*out = append(*out, sseData(item))
 }
@@ -680,17 +681,15 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		if w.blockType != "" {
 			w.endBlock(&out)
 		}
-		w.emitCompleted(model, &out)
+		// 延迟发送 response.completed：等 usage 到达后合并，只发一次（对齐上游原生格式）。
+		w.finishSeen = true
+		if w.pendingUsage != nil {
+			w.emitCompleted(model, &out)
+		}
 	case "usage":
 		w.pendingUsage = ev.Usage
-		if w.completed {
-			// completed 已发，补发带 usage 的 completed（AI SDK 需要 usage）
-			u := usageMap(ev.Usage)
-			evt, _ := json.Marshal(map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{"id": "resp_1", "object": "response", "status": "completed", "model": model, "usage": u},
-			})
-			out = append(out, sseData(evt))
+		if w.finishSeen {
+			w.emitCompleted(model, &out)
 		}
 	case "done":
 		if w.blockType != "" {

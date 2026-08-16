@@ -58,6 +58,16 @@
       "max_output_tokens": 128000, // 单次最大输出 token（models.dev opencode-go）
       "transformation": "openai_responses", // 统一转为 Responses 发上游（gpt 原生支持 Responses/web_search）
       "modality": "text+image->text" // 模态：文本+图片->文本
+    },
+    "hy3": {
+      "input_per_million": 0.14,
+      "output_per_million": 0.58,
+      "cached_read_per_million": 0.0028,
+      "cached_write_per_million": 0,
+      "context_length": 256000,
+      "max_output_tokens": 64000, // 单次最大输出 token（models.dev opencode-go）
+      "transformation": "openai_completions", // 统一转为 chat/completions 发上游
+      "modality": "text->text" // 模态：纯文本
     }
   },
   "users": [
