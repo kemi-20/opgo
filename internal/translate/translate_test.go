@@ -494,3 +494,37 @@ func TestConvertResponsesToAnthropicMultimodal(t *testing.T) {
 		t.Errorf("图片/音频未正确转换: content=%v", content)
 	}
 }
+
+// TestConvertRequestForcesIncludeUsage 验证：转换模式强制请求 usage（计费必需）。
+func TestConvertRequestForcesIncludeUsage(t *testing.T) {
+	// anthropic 流式 → completions：必须带 stream_options.include_usage
+	raw := []byte(`{"model":"mimo-v2.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := ConvertRequest(FormatAnthropic, FormatOpenAICompletions, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	_ = json.Unmarshal(out, &obj)
+	so, ok := obj["stream_options"].(map[string]any)
+	if !ok || so["include_usage"] != true {
+		t.Errorf("→completions 流式应注入 stream_options.include_usage: %s", out)
+	}
+	// anthropic 非流式 → responses：必须带 include:["usage"]
+	raw2 := []byte(`{"model":"mimo-v2.5","messages":[{"role":"user","content":"hi"}]}`)
+	out2, err := ConvertRequest(FormatAnthropic, FormatOpenAIResponses, raw2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj2 map[string]any
+	_ = json.Unmarshal(out2, &obj2)
+	inc, _ := obj2["include"].([]any)
+	found := false
+	for _, i := range inc {
+		if i == "usage" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("→responses 应注入 include:[\"usage\"]: %s", out2)
+	}
+}

@@ -319,6 +319,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Response, user *config.User, key, model string, price config.ModelPricing, now time.Time, conv *translate.StreamConverter) {
 	var acc meter.Usage
 	got := false
+	discard := false // 客户端断开：继续读上游解析 usage 计费，不再写出
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 8<<20)
@@ -335,6 +336,14 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if discard {
+			// 客户端断开后仍解析 usage（usage 事件在上游流末尾）
+			if u, ok := meter.ParseSSEUsage(line); ok {
+				got = true
+				mergeUsage(&acc, u)
+			}
+			continue
+		}
 		if conv == nil {
 			// 透传：同时解析 usage 计费
 			if u, ok := meter.ParseSSEUsage(line); ok {
@@ -344,7 +353,8 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 			lineCopy := make([]byte, len(line))
 			copy(lineCopy, line)
 			if !writeChunks([][]byte{append(lineCopy, '\n')}) {
-				return
+				discard = true
+				continue
 			}
 			continue
 		}
@@ -355,20 +365,16 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 		}
 		chunks, done := conv.Feed(line)
 		if !writeChunks(chunks) {
-			return
+			discard = true
+			continue
 		}
 		if done {
 			if !writeChunks(conv.Close()) {
-				return
+				discard = true
+				continue
 			}
 			conv = nil // 已关闭，不再补
 			break
-		}
-	}
-	if conv != nil {
-		// 上游流结束但未见终止事件（如 [DONE] 缺失），补齐终止
-		if !writeChunks(conv.Close()) {
-			return
 		}
 	}
 	if got && model != "" {

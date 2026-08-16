@@ -20,6 +20,10 @@ func ConvertRequest(from, to Format, raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 计费必需：转换模式下强制请求 usage（上游响应需带 usage 才能按 token 计费）。
+	// →completions 注入 stream_options.include_usage（仅流式生效，非流式上游天然带）；
+	// →responses 注入 include:["usage"]（流式/非流式均生效）；→anthropic 天然带 usage。
+	req.IncludeUsage = true
 	switch to {
 	case FormatOpenAICompletions:
 		return buildOpenAICompletionsRequest(req)

@@ -1115,3 +1115,89 @@ func TestTransformNon2xxPassthrough(t *testing.T) {
 		t.Errorf("非 2xx 不应被转换为 anthropic 格式: %s", body)
 	}
 }
+
+// TestTransformStreamRecordsUsage 复现：转换模式 + 流式，上游返回带 usage 的 completions 流，
+// 断言 db 正确记账（曾因转换分支计费失效导致 0 行）。
+func TestTransformStreamRecordsUsage(t *testing.T) {
+	fu := &fakeUpstream{stream: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Transformation = "openai_completions"
+		c.Pricing["mimo-v2.5"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 客户端 anthropic 流式
+	body := `{"model":"mimo-v2.5","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	st, respBody, _ := doReq(t, srv, "POST", "/v1/messages", testUser1, body)
+	if st != 200 {
+		t.Fatalf("status = %d: %s", st, respBody)
+	}
+	// fakeUpstream 流式：第一行 content，第二行 usage(100/50/150 cached=10)，第三行 [DONE]
+	// 转换后 anthropic 流应含 message_delta usage
+	if !strings.Contains(respBody, "message_stop") {
+		t.Errorf("流式响应不完整: %s", respBody)
+	}
+	sum, err := db.UserWindowSum("uuid-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum == 0 {
+		t.Error("转换模式流式应记账（usage 需被解析）")
+	}
+	if sum != 2663 {
+		t.Errorf("sum = %d, want 2663（90*0.14 + 10*0.0028 + 50*0.28 = 2663 微元）", sum)
+	}
+}
+
+// TestTransformStreamUsageAfterClientDisconnect 模拟 Claude Code 行为：流式客户端
+// 在收到部分内容后提前断开连接（usage 事件在上游流末尾）。opgo 必须继续读上游
+// 解析 usage 并记账，不能因写失败跳过计费。
+func TestTransformStreamUsageAfterClientDisconnect(t *testing.T) {
+	fu := &fakeUpstream{stream: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Transformation = "openai_completions"
+		c.Pricing["mimo-v2.5"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"mimo-v2.5","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req, err := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testUser1)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟客户端提前断开：只读前 200 字节然后关闭
+	buf := make([]byte, 200)
+	_, _ = resp.Body.Read(buf)
+	resp.Body.Close()
+	// 等待 opgo 读到上游 usage 并记账
+	deadline := time.Now().Add(3 * time.Second)
+	var sum int64
+	for time.Now().Before(deadline) {
+		sum, _ = db.UserWindowSum("uuid-1", 0)
+		if sum > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sum == 0 {
+		t.Fatal("客户端提前断开后也应记账（读上游 usage）")
+	}
+	if sum != 2663 {
+		t.Errorf("sum = %d, want 2663", sum)
+	}
+}
