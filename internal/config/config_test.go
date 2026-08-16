@@ -2,6 +2,7 @@ package config
 
 import (
 	"io"
+	"regexp"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,10 +18,10 @@ const exampleJSON = `{
 	"rate_limit_per_minute": 60,
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
-		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-		"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1048576},
-		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1048576}
+		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
+		"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000},
+		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
+		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000}
 	},
 	"users": [
 		{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-u1", "sk-u1b"]},
@@ -63,8 +64,8 @@ func TestParseExample(t *testing.T) {
 		t.Error("nope 不应有价格")
 	}
 	dp, _ := c.Price("deepseek-v4-flash")
-	if !dp.HasContextLength() || dp.ContextLength != 1048576 {
-		t.Errorf("deepseek-v4-flash context_length = %d，应默认 1048576", dp.ContextLength)
+	if !dp.HasContextLength() || dp.ContextLength != 1000000 {
+		t.Errorf("deepseek-v4-flash context_length = %d，应默认 1000000", dp.ContextLength)
 	}
 	u := c.UserByKey("sk-u1b")
 	if u == nil || u.UUID != "uuid-1" {
@@ -205,7 +206,7 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 
 func TestContextLengthOptional(t *testing.T) {
 	// 不写 context_length 时视为未设置，HasContextLength 为 false
-	cfg := strings.Replace(exampleJSON, ", \"context_length\": 1048576", "", -1)
+	cfg := regexp.MustCompile(`,\s*"context_length":\s*\d+`).ReplaceAllString(exampleJSON, "")
 	c, err := Parse([]byte(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -286,9 +287,9 @@ func TestParseJSONCComments(t *testing.T) {
 		"admin_password": "ADMIN_REPLACE_ME",
 		"rate_limit_per_minute": 60,
 		"pricing": {
-			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576, "transformation": "" // 空=透传
+			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "transformation": "" // 空=透传
 			},
-			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576, "transformation": "openai_completions" /* 转 completions */ }
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "transformation": "openai_completions" /* 转 completions */ }
 		},
 		"users": [{"uuid": "uuid-1", "keys": ["sk-u1"]}]
 	}`

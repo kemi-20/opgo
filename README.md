@@ -59,9 +59,56 @@ go build -o opgo.exe .
 | balance_interval_seconds | 余量同步间隔，默认 120 |
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
-| pricing | 模型单价（每百万 token）+ context_length（上下文长度，可省略） |
+| pricing | 模型单价（每百万 token）+ context_length（上下文长度）+ modality（模态，可省略，默认 text->text） |
 | boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
+
+## 模型模态（modality）
+
+每个模型可在 pricing 中配置 `modality` 字段描述输入/输出模态，格式为 `输入1+输入2->输出1`。留空默认为 `text->text`。
+
+```json
+"pricing": {
+  "deepseek-v4-flash": {
+    "input_per_million": 0.14,
+    "output_per_million": 0.28,
+    "cached_read_per_million": 0.0028,
+    "cached_write_per_million": 0,
+    "context_length": 1000000,
+    "modality": "text->text"
+  },
+  "mimo-v2.5": {
+    "input_per_million": 0.14,
+    "output_per_million": 0.28,
+    "cached_read_per_million": 0.0028,
+    "cached_write_per_million": 0,
+    "context_length": 1000000,
+    "modality": "text+image+audio+video->text"
+  }
+}
+```
+
+示例配置预置：
+
+| 模型 | modality |
+|---|---|
+| deepseek-v4-flash / deepseek-v4-pro | `text->text`（默认） |
+| mimo-v2.5 | `text+image+audio+video->text` |
+| gpt-5.6-luna | `text+image->text` |
+
+`GET /v1/models` 会把 modality 自动拆为三个字段返回：
+
+```json
+{
+  "id": "mimo-v2.5",
+  "object": "model",
+  "architecture": {
+    "modality": "text+image+audio+video->text",
+    "input_modalities": ["text", "image", "audio", "video"],
+    "output_modalities": ["text"]
+  }
+}
+```
 
 ## 协议转换（transformation）
 
@@ -74,7 +121,7 @@ go build -o opgo.exe .
     "output_per_million": 0.28,
     "cached_read_per_million": 0.0028,
     "cached_write_per_million": 0,
-    "context_length": 1048576,
+    "context_length": 1000000,
     "transformation": "openai_completions"
   }
 }

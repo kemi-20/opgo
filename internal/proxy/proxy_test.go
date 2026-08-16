@@ -36,10 +36,10 @@ func testConfigJSON(upstream string) string {
 		"rate_limit_per_minute": 0,
 		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 		"pricing": {
-			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1048576},
-			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1048576},
-			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1048576}
+			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
+			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000},
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
+			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -376,6 +376,11 @@ func TestModelsList(t *testing.T) {
 		Data []struct {
 			ID            string `json:"id"`
 			ContextLength int64  `json:"context_length"`
+			Architecture  *struct {
+				Modality         string   `json:"modality"`
+				InputModalities  []string `json:"input_modalities"`
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
@@ -384,13 +389,107 @@ func TestModelsList(t *testing.T) {
 	if len(obj.Data) != 4 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" {
 		t.Errorf("models = %+v", obj.Data)
 	}
+	wantCtx := map[string]int64{
+		"deepseek-v4-flash": 1000000,
+		"deepseek-v4-pro":   1000000,
+		"mimo-v2.5":         1000000,
+		"gpt-5.6-luna":      1050000,
+	}
 	for i, m := range obj.Data {
-		if m.ContextLength != 1048576 {
-			t.Errorf("models[%d] context_length = %d，应 1048576", i, m.ContextLength)
+		if w, ok := wantCtx[m.ID]; !ok || m.ContextLength != w {
+			t.Errorf("models[%d] %s context_length = %d，应 %d", i, m.ID, m.ContextLength, w)
+		}
+		// 未配置 modality 默认 text->text
+		if m.Architecture == nil || m.Architecture.Modality != "text->text" {
+			t.Errorf("models[%d] architecture = %+v，应默认 text->text", i, m.Architecture)
+		}
+		if m.Architecture != nil {
+			if len(m.Architecture.InputModalities) != 1 || m.Architecture.InputModalities[0] != "text" {
+				t.Errorf("models[%d] input_modalities = %v", i, m.Architecture.InputModalities)
+			}
+			if len(m.Architecture.OutputModalities) != 1 || m.Architecture.OutputModalities[0] != "text" {
+				t.Errorf("models[%d] output_modalities = %v", i, m.Architecture.OutputModalities)
+			}
 		}
 	}
 	if status, _, _ := doReq(t, srv, "GET", "/v1/models", "", ""); status != 401 {
 		t.Errorf("未认证 status = %d", status)
+	}
+}
+
+// TestModelsListModalityConfigured 验证 config 配置的 modality 拆分为三个字段。
+func TestModelsListModalityConfigured(t *testing.T) {
+	up := newFakeServer(&fakeUpstream{})
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		for name, pr := range c.Pricing {
+			switch name {
+			case "mimo-v2.5":
+				pr.Modality = "text+image+audio+video->text"
+			case "gpt-5.6-luna":
+				pr.Modality = "text+image->text"
+			default:
+				pr.Modality = "text->text"
+			}
+			c.Pricing[name] = pr
+		}
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	status, body, _ := doReq(t, srv, "GET", "/v1/models", testUser1, "")
+	if status != 200 {
+		t.Fatalf("status = %d", status)
+	}
+	var obj struct {
+		Data []struct {
+			ID           string `json:"id"`
+			Architecture *struct {
+				Modality         string   `json:"modality"`
+				InputModalities  []string `json:"input_modalities"`
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]*struct {
+		ID           string `json:"id"`
+		Architecture *struct {
+			Modality         string   `json:"modality"`
+			InputModalities  []string `json:"input_modalities"`
+			OutputModalities []string `json:"output_modalities"`
+		} `json:"architecture"`
+	}{}
+	for i := range obj.Data {
+		byID[obj.Data[i].ID] = &obj.Data[i]
+	}
+	m := byID["mimo-v2.5"]
+	if m == nil || m.Architecture == nil {
+		t.Fatalf("mimo-v2.5 缺 architecture: %s", body)
+	}
+	if m.Architecture.Modality != "text+image+audio+video->text" {
+		t.Errorf("mimo modality = %q", m.Architecture.Modality)
+	}
+	want := []string{"text", "image", "audio", "video"}
+	if len(m.Architecture.InputModalities) != len(want) {
+		t.Fatalf("mimo input_modalities = %v", m.Architecture.InputModalities)
+	}
+	for i := range want {
+		if m.Architecture.InputModalities[i] != want[i] {
+			t.Errorf("mimo input_modalities[%d] = %q", i, m.Architecture.InputModalities[i])
+		}
+	}
+	if len(m.Architecture.OutputModalities) != 1 || m.Architecture.OutputModalities[0] != "text" {
+		t.Errorf("mimo output_modalities = %v", m.Architecture.OutputModalities)
+	}
+	g := byID["gpt-5.6-luna"]
+	if g == nil || g.Architecture == nil || g.Architecture.Modality != "text+image->text" {
+		t.Errorf("gpt architecture = %+v", g)
+	}
+	if len(g.Architecture.InputModalities) != 2 || g.Architecture.InputModalities[0] != "text" || g.Architecture.InputModalities[1] != "image" {
+		t.Errorf("gpt input_modalities = %v", g.Architecture.InputModalities)
 	}
 }
 

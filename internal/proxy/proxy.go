@@ -148,8 +148,17 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]any, 0, len(c.ModelNames()))
 	for _, name := range c.ModelNames() {
 		item := map[string]any{"id": name, "object": "model", "created": created, "owned_by": "config"}
-		if pr, ok := c.Price(name); ok && pr.HasContextLength() {
-			item["context_length"] = pr.ContextLength
+		if pr, ok := c.Price(name); ok {
+			if pr.HasContextLength() {
+				item["context_length"] = pr.ContextLength
+			}
+			// 模态：config 为空默认 text->text，拆为 architecture.modality/input_modalities/output_modalities
+			m := pr.EffectiveModality()
+			item["architecture"] = map[string]any{
+				"modality":          m.Raw,
+				"input_modalities":  m.Input,
+				"output_modalities": m.Output,
+			}
 		}
 		data = append(data, item)
 	}

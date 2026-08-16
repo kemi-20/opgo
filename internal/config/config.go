@@ -26,6 +26,48 @@ type ModelPricing struct {
 	// 支持 openai_completions / openai_responses / anthropic。
 	// 客户端以任意格式访问时，自动转换为该格式转发给上游。
 	Transformation string `json:"transformation"`
+	// Modality 模型模态，格式 "输入1+输入2->输出1"；空 = "text->text"。
+	// /v1/models 会拆成 architecture.modality / input_modalities / output_modalities。
+	Modality string `json:"modality"`
+}
+
+// ModalityInfo 解析后的模态信息。
+type ModalityInfo struct {
+	Raw       string   `json:"modality"`
+	Input     []string `json:"input_modalities"`
+	Output    []string `json:"output_modalities"`
+}
+
+// EffectiveModality 返回模型模态；为空默认 "text->text"。
+func (p ModelPricing) EffectiveModality() ModalityInfo {
+	raw := strings.TrimSpace(p.Modality)
+	if raw == "" {
+		raw = "text->text"
+	}
+	info := ModalityInfo{Raw: raw}
+	parts := strings.SplitN(raw, "->", 2)
+	if len(parts) == 2 {
+		info.Input = splitModalities(parts[0])
+		info.Output = splitModalities(parts[1])
+	} else {
+		info.Input = splitModalities(raw)
+		info.Output = []string{"text"}
+	}
+	return info
+}
+
+func splitModalities(s string) []string {
+	var out []string
+	for _, m := range strings.Split(s, "+") {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"text"}
+	}
+	return out
 }
 
 // HasContextLength 是否配置了上下文长度。
