@@ -2,10 +2,10 @@ package config
 
 import (
 	"io"
-	"regexp"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -18,10 +18,10 @@ const exampleJSON = `{
 	"rate_limit_per_minute": 60,
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
-		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
-		"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000},
-		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
-		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000}
+		"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
+		"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
+		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
+		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000}
 	},
 	"users": [
 		{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-u1", "sk-u1b"]},
@@ -66,6 +66,15 @@ func TestParseExample(t *testing.T) {
 	dp, _ := c.Price("deepseek-v4-flash")
 	if !dp.HasContextLength() || dp.ContextLength != 1000000 {
 		t.Errorf("deepseek-v4-flash context_length = %d，应默认 1000000", dp.ContextLength)
+	}
+	if !dp.HasMaxOutputTokens() || dp.MaxOutputTokens != 384000 {
+		t.Errorf("deepseek-v4-flash max_output_tokens = %d，应 384000", dp.MaxOutputTokens)
+	}
+	if mp, _ := c.Price("mimo-v2.5"); !mp.HasMaxOutputTokens() || mp.MaxOutputTokens != 128000 {
+		t.Errorf("mimo-v2.5 max_output_tokens = %d，应 128000", mp.MaxOutputTokens)
+	}
+	if lp, _ := c.Price("gpt-5.6-luna"); !lp.HasMaxOutputTokens() || lp.MaxOutputTokens != 128000 {
+		t.Errorf("gpt-5.6-luna max_output_tokens = %d，应 128000", lp.MaxOutputTokens)
 	}
 	u := c.UserByKey("sk-u1b")
 	if u == nil || u.UUID != "uuid-1" {
@@ -205,8 +214,9 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 }
 
 func TestContextLengthOptional(t *testing.T) {
-	// 不写 context_length 时视为未设置，HasContextLength 为 false
+	// 不写 context_length / max_output_tokens 时视为未设置，对应 Has* 为 false
 	cfg := regexp.MustCompile(`,\s*"context_length":\s*\d+`).ReplaceAllString(exampleJSON, "")
+	cfg = regexp.MustCompile(`,\s*"max_output_tokens":\s*\d+`).ReplaceAllString(cfg, "")
 	c, err := Parse([]byte(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +228,9 @@ func TestContextLengthOptional(t *testing.T) {
 		}
 		if p.HasContextLength() {
 			t.Errorf("%s 未配置 context_length 时应视为空", name)
+		}
+		if p.HasMaxOutputTokens() {
+			t.Errorf("%s 未配置 max_output_tokens 时应视为空", name)
 		}
 	}
 }
@@ -255,8 +268,8 @@ func TestBoostValidation(t *testing.T) {
 			`"rate_limit_per_minute": 60, "boost": {`+patch+`},`, 1)
 	}
 	cases := []struct {
-		name  string
-		cfg   string
+		name string
+		cfg  string
 	}{
 		{"base_overage < 100", with(`"enabled": true, "base_overage_percent": 99`)},
 		{"boost_percent <= 100", with(`"enabled": true, "boost_percent": 100`)},

@@ -36,10 +36,10 @@ func testConfigJSON(upstream string) string {
 		"rate_limit_per_minute": 0,
 		"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 		"pricing": {
-			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
-			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000},
-			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000},
-			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000}
+			"deepseek-v4-flash": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
+			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
+			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
+			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -374,9 +374,10 @@ func TestModelsList(t *testing.T) {
 	}
 	var obj struct {
 		Data []struct {
-			ID            string `json:"id"`
-			ContextLength int64  `json:"context_length"`
-			Architecture  *struct {
+			ID              string `json:"id"`
+			ContextLength   int64  `json:"context_length"`
+			MaxOutputTokens int64  `json:"max_output_tokens"`
+			Architecture    *struct {
 				Modality         string   `json:"modality"`
 				InputModalities  []string `json:"input_modalities"`
 				OutputModalities []string `json:"output_modalities"`
@@ -395,9 +396,18 @@ func TestModelsList(t *testing.T) {
 		"mimo-v2.5":         1000000,
 		"gpt-5.6-luna":      1050000,
 	}
+	wantMax := map[string]int64{
+		"deepseek-v4-flash": 384000,
+		"deepseek-v4-pro":   384000,
+		"mimo-v2.5":         128000,
+		"gpt-5.6-luna":      128000,
+	}
 	for i, m := range obj.Data {
 		if w, ok := wantCtx[m.ID]; !ok || m.ContextLength != w {
 			t.Errorf("models[%d] %s context_length = %d，应 %d", i, m.ID, m.ContextLength, w)
+		}
+		if w, ok := wantMax[m.ID]; !ok || m.MaxOutputTokens != w {
+			t.Errorf("models[%d] %s max_output_tokens = %d，应 %d", i, m.ID, m.MaxOutputTokens, w)
 		}
 		// 未配置 modality 默认 text->text
 		if m.Architecture == nil || m.Architecture.Modality != "text->text" {
@@ -747,10 +757,11 @@ func TestNoKeyLeak(t *testing.T) {
 func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	up := newFakeServer(&fakeUpstream{})
 	defer up.Close()
-	// 清除所有模型的 context_length，模拟 config 未定义
+	// 清除所有模型的 context_length / max_output_tokens，模拟 config 未定义
 	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
 		for name, pr := range c.Pricing {
 			pr.ContextLength = 0
+			pr.MaxOutputTokens = 0
 			c.Pricing[name] = pr
 		}
 	})
@@ -763,6 +774,9 @@ func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	}
 	if strings.Contains(body, "context_length") {
 		t.Errorf("未配置 context_length 时 /models 不应包含该字段，body = %s", body)
+	}
+	if strings.Contains(body, "max_output_tokens") {
+		t.Errorf("未配置 max_output_tokens 时 /models 不应包含该字段，body = %s", body)
 	}
 	var obj struct {
 		Data []struct {
@@ -1051,9 +1065,9 @@ func TestForwardPassThroughHeaders(t *testing.T) {
 	defer srv.Close()
 
 	h := map[string]string{
-		"User-Agent":     "MyCustomSDK/1.2.3",
-		"X-Test-Custom":  "hello-world",
-		"X-API-Key":      "client-own-key-should-not-leak",
+		"User-Agent":    "MyCustomSDK/1.2.3",
+		"X-Test-Custom": "hello-world",
+		"X-API-Key":     "client-own-key-should-not-leak",
 	}
 	st, _, _ := doReqH(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody, h)
 	if st != 200 {

@@ -59,7 +59,7 @@ go build -o opgo.exe .
 | balance_interval_seconds | 余量同步间隔，默认 120 |
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
-| pricing | 模型单价（每百万 token）+ context_length（上下文长度）+ modality（模态，可省略，默认 text->text） |
+| pricing | 模型单价（每百万 token）+ context_length（上下文长度）+ max_output_tokens（最大输出 token）+ modality（模态，可省略，默认 text->text） |
 | boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
 
@@ -75,6 +75,7 @@ go build -o opgo.exe .
     "cached_read_per_million": 0.0028,
     "cached_write_per_million": 0,
     "context_length": 1000000,
+    "max_output_tokens": 384000,
     "modality": "text->text"
   },
   "mimo-v2.5": {
@@ -83,6 +84,7 @@ go build -o opgo.exe .
     "cached_read_per_million": 0.0028,
     "cached_write_per_million": 0,
     "context_length": 1000000,
+    "max_output_tokens": 128000,
     "modality": "text+image+audio+video->text"
   }
 }
@@ -122,6 +124,7 @@ go build -o opgo.exe .
     "cached_read_per_million": 0.0028,
     "cached_write_per_million": 0,
     "context_length": 1000000,
+    "max_output_tokens": 128000,
     "transformation": "openai_completions"
   }
 }
@@ -148,7 +151,7 @@ go build -o opgo.exe .
 
 程序后台每 1 秒轮询 config 文件，修改保存后**无需重启**立即生效：
 
-- users（增删用户/key）、pricing（价格/模型列表/context_length）、limits_per_user、master_key、admin_password、rate_limit_per_minute、upstream_base、balance_url、balance_interval_seconds
+- users（增删用户/key）、pricing（价格/模型列表/context_length/max_output_tokens）、limits_per_user、master_key、admin_password、rate_limit_per_minute、upstream_base、balance_url、balance_interval_seconds
 - 配置文件非法（JSON 错误或校验不通过）时自动保留旧配置并在日志告警，不影响运行
 - 仅 `listen` 变更需要重启生效，检测到时会打印警告日志
 

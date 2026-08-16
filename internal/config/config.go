@@ -22,6 +22,8 @@ type ModelPricing struct {
 	CachedWritePerMillion float64 `json:"cached_write_per_million"`
 	// ContextLength 上下文长度（token）；<=0 视为未设置，/models 不输出该字段。
 	ContextLength int64 `json:"context_length"`
+	// MaxOutputTokens 单次最大输出 token；<=0 视为未设置，/models 不输出该字段。
+	MaxOutputTokens int64 `json:"max_output_tokens"`
 	// Transformation 协议转换目标格式：空/false/0 = 透传只替换认证；
 	// 支持 openai_completions / openai_responses / anthropic。
 	// 客户端以任意格式访问时，自动转换为该格式转发给上游。
@@ -33,9 +35,9 @@ type ModelPricing struct {
 
 // ModalityInfo 解析后的模态信息。
 type ModalityInfo struct {
-	Raw       string   `json:"modality"`
-	Input     []string `json:"input_modalities"`
-	Output    []string `json:"output_modalities"`
+	Raw    string   `json:"modality"`
+	Input  []string `json:"input_modalities"`
+	Output []string `json:"output_modalities"`
 }
 
 // EffectiveModality 返回模型模态；为空默认 "text->text"。
@@ -73,6 +75,9 @@ func splitModalities(s string) []string {
 // HasContextLength 是否配置了上下文长度。
 func (p ModelPricing) HasContextLength() bool { return p.ContextLength > 0 }
 
+// HasMaxOutputTokens 是否配置了最大输出 token。
+func (p ModelPricing) HasMaxOutputTokens() bool { return p.MaxOutputTokens > 0 }
+
 // RawPrice 每个模型的每百万 token 价格的原始 JSON 文本（保留 config 原版精度）。
 type RawPrice struct {
 	InputPerMillion       string `json:"input_per_million"`
@@ -80,6 +85,7 @@ type RawPrice struct {
 	CachedReadPerMillion  string `json:"cached_read_per_million"`
 	CachedWritePerMillion string `json:"cached_write_per_million"`
 }
+
 // User 一个共享用户；同 uuid 多个 key 共享同一额度。
 type User struct {
 	UUID   string             `json:"uuid"`
@@ -93,21 +99,21 @@ type User struct {
 // 某窗口 used ≥ TriggerPercent%×L 且满足池子/跨窗口健康时，智能提额到
 // BoostPercent%×L（105% 不叠加），提额状态只存在内存，按 resetsAt 周期对齐。
 type Boost struct {
-	Enabled              bool `json:"enabled"`
-	BaseOveragePercent   int  `json:"base_overage_percent"`
-	TriggerPercent       int  `json:"trigger_percent"`
-	BoostPercent         int  `json:"boost_percent"`
-	PoolMaxPercent       int  `json:"pool_max_percent"`
+	Enabled               bool `json:"enabled"`
+	BaseOveragePercent    int  `json:"base_overage_percent"`
+	TriggerPercent        int  `json:"trigger_percent"`
+	BoostPercent          int  `json:"boost_percent"`
+	PoolMaxPercent        int  `json:"pool_max_percent"`
 	OtherWindowMaxPercent int  `json:"other_window_max_percent"`
 }
 
 // BoostDefaults 返回默认值（未配置时合并到 0 值上，enabled 保持 false）。
 func BoostDefaults() Boost {
 	return Boost{
-		BaseOveragePercent:   105,
-		TriggerPercent:       90,
-		BoostPercent:         150,
-		PoolMaxPercent:       85,
+		BaseOveragePercent:    105,
+		TriggerPercent:        90,
+		BoostPercent:          150,
+		PoolMaxPercent:        85,
 		OtherWindowMaxPercent: 95,
 	}
 }
@@ -381,7 +387,6 @@ func (c *Config) Price(model string) (ModelPricing, bool) {
 	return p, ok
 }
 
-
 // RawModelPrice 模型与其原始价格的展示条目（按 config 书写顺序）。
 type RawModelPrice struct {
 	Model string   `json:"model"`
@@ -398,6 +403,7 @@ func (c *Config) RawPricing() []RawModelPrice {
 	}
 	return out
 }
+
 // ModelNames 返回 pricing 的书写顺序。
 func (c *Config) ModelNames() []string { return c.modelOrder }
 

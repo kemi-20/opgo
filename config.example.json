@@ -25,6 +25,7 @@
       "cached_read_per_million": 0.0028,
       "cached_write_per_million": 0,
       "context_length": 1000000,
+      "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）
       "transformation": "", // 空=透传只替换认证
       "modality": "text->text" // 模态：输入->输出（空默认 text->text）
     },
@@ -34,6 +35,7 @@
       "cached_read_per_million": 0.0145,
       "cached_write_per_million": 0,
       "context_length": 1000000,
+      "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）
       "transformation": "", // 空=透传只替换认证
       "modality": "text->text" // 模态：输入->输出（空默认 text->text）
     },
@@ -43,6 +45,7 @@
       "cached_read_per_million": 0.0028,
       "cached_write_per_million": 0,
       "context_length": 1000000,
+      "max_output_tokens": 128000, // 单次最大输出 token（models.dev opencode-go）
       "transformation": "openai_completions", // 统一转为 chat/completions 发上游（mimo 上游只有 completions 完整）
       "modality": "text+image+audio+video->text" // 模态：多模态输入->文本
     },
@@ -52,6 +55,7 @@
       "cached_read_per_million": 0.16,
       "cached_write_per_million": 2.00,
       "context_length": 1050000,
+      "max_output_tokens": 128000, // 单次最大输出 token（models.dev opencode-go）
       "transformation": "openai_responses", // 统一转为 Responses 发上游（gpt 原生支持 Responses/web_search）
       "modality": "text+image->text" // 模态：文本+图片->文本
     }

@@ -35,12 +35,16 @@ else
   echo "    未检测到配置，首次启动时程序会自动生成示例配置 $OPGO_DIR/config.json。"
 fi
 
-echo "==> 下载最新 release"
-ASSET_URL="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.assets[] | select(.name=="opgo-linux-amd64") | .browser_download_url')"
-if [ -z "$ASSET_URL" ]; then
+echo "==> 获取最新 release 信息"
+RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+VERSION="$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name')"
+ASSET_URL="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name=="opgo-linux-amd64") | .browser_download_url')"
+if [ -z "$ASSET_URL" ] || [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
   echo "未找到 opgo-linux-amd64，请确认仓库 ${REPO} 已发布 v* 版本。" >&2
   exit 1
 fi
+
+echo "==> 下载最新 release ${VERSION}"
 curl -fsSL -o "${BIN}.tmp" "$ASSET_URL"
 chmod +x "${BIN}.tmp"
 mv "${BIN}.tmp" "$BIN"

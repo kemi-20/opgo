@@ -152,6 +152,9 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 			if pr.HasContextLength() {
 				item["context_length"] = pr.ContextLength
 			}
+			if pr.HasMaxOutputTokens() {
+				item["max_output_tokens"] = pr.MaxOutputTokens
+			}
 			// 模态：config 为空默认 text->text，拆为 architecture.modality/input_modalities/output_modalities
 			m := pr.EffectiveModality()
 			item["architecture"] = map[string]any{
