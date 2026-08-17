@@ -200,8 +200,8 @@ function fillPricing(container, pricing) {
     var tdName = document.createElement("td");
     tdName.textContent = item.model || "";
           // config 中配置的 tag（如 "高峰期2x消耗"）显示在模型名右侧
-      if (item.tag) {
-        tdName.appendChild(badge(item.tag, "green"));
+      if (p.tag) {
+        tdName.appendChild(badge(p.tag, "green"));
       }
 tr.appendChild(tdName);
     [p.input_per_million, p.output_per_million, p.cached_read_per_million, p.cached_write_per_million].forEach(function (v) {
