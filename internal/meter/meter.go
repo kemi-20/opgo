@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strconv"
 	"strings"
+	"time"
 
 	"opgo/internal/config"
 )
@@ -189,4 +191,72 @@ func ParseSSEUsage(line []byte) (Usage, bool) {
 		}
 	}
 	return Usage{}, false
+}
+
+// IsPeakTime 判断给定时间（UTC）是否落在峰时窗口内。
+// windows 每项为 [开始HH:MM, 结束HH:MM)，支持跨天窗口（start > end 时视为跨午夜）。
+func IsPeakTime(now time.Time, windows [][]string) bool {
+	utc := now.UTC()
+	mins := utc.Hour()*60 + utc.Minute()
+	for _, w := range windows {
+		if len(w) != 2 {
+			continue
+		}
+		start, ok1 := parseHHMM(w[0])
+		end, ok2 := parseHHMM(w[1])
+		if !ok1 || !ok2 {
+			continue
+		}
+		if start == end {
+			continue
+		}
+		if start < end {
+			if mins >= start && mins < end {
+				return true
+			}
+		} else {
+			// 跨天：例如 22:00-02:00
+			if mins >= start || mins < end {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ApplyPeak 若模型配置了模型级 peak 且当前为峰时，返回价格乘以 Multiplier 后的副本；否则原样返回。
+// 模型未配置 peak（price.Peak == nil）或 peak.Enabled == false 或 windows 为空时不生效。
+func ApplyPeak(price config.ModelPricing, model string, now time.Time) config.ModelPricing {
+	if price.Peak == nil {
+		return price
+	}
+	p := price.Peak
+	if p.Enabled != nil && !*p.Enabled {
+		return price
+	}
+	mult := p.Multiplier
+	if mult <= 1 {
+		mult = 2 // 默认峰时倍率 2 倍
+	}
+	if len(p.Windows) == 0 || !IsPeakTime(now, p.Windows) {
+		return price
+	}
+	price.InputPerMillion *= mult
+	price.OutputPerMillion *= mult
+	price.CachedReadPerMillion *= mult
+	price.CachedWritePerMillion *= mult
+	return price
+}
+
+func parseHHMM(s string) (int, bool) {
+	h, m, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0, false
+	}
+	hh, err1 := strconv.Atoi(h)
+	mm, err2 := strconv.Atoi(m)
+	if err1 != nil || err2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
+		return 0, false
+	}
+	return hh*60 + mm, true
 }

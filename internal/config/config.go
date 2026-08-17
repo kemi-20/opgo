@@ -28,6 +28,10 @@ type ModelPricing struct {
 	// 支持 openai_completions / openai_responses / anthropic。
 	// 客户端以任意格式访问时，自动转换为该格式转发给上游。
 	Transformation string `json:"transformation"`
+	// Tag 前端定价表中模型名右侧显示的标签（可空）。
+	Tag string `json:"tag,omitempty"`
+	// Peak 模型级峰谷时配置（可空 = 该模型不启用峰谷）。config 中填谷时价，峰时自动乘 Multiplier。
+	Peak *ModelPeak `json:"peak,omitempty"`
 	// Modality 模型模态，格式 "输入1+输入2->输出1"；空 = "text->text"。
 	// /v1/models 会拆成 architecture.modality / input_modalities / output_modalities。
 	Modality string `json:"modality"`
@@ -78,12 +82,24 @@ func (p ModelPricing) HasContextLength() bool { return p.ContextLength > 0 }
 // HasMaxOutputTokens 是否配置了最大输出 token。
 func (p ModelPricing) HasMaxOutputTokens() bool { return p.MaxOutputTokens > 0 }
 
+// ModelPeak 模型级峰谷时配置：Peak 时段自动对该模型价格乘 Multiplier（默认 2 倍）。
+// config 中填写的是谷时价格，峰时自动翻倍扣款，无需额外填写峰时价格。
+type ModelPeak struct {
+	// Enabled 是否启用峰谷（默认 true，配置了 peak 即启用）。
+	Enabled *bool `json:"enabled,omitempty"`
+	// Multiplier 峰时价格倍率（默认 2）。
+	Multiplier float64 `json:"multiplier,omitempty"`
+	// Windows 峰时时间段列表，每项 [开始HH:MM, 结束HH:MM)（UTC）。空 = 无峰时。
+	Windows [][]string `json:"windows"`
+}
+
 // RawPrice 每个模型的每百万 token 价格的原始 JSON 文本（保留 config 原版精度）。
 type RawPrice struct {
 	InputPerMillion       string `json:"input_per_million"`
 	OutputPerMillion      string `json:"output_per_million"`
 	CachedReadPerMillion  string `json:"cached_read_per_million"`
 	CachedWritePerMillion string `json:"cached_write_per_million"`
+	Tag                   string `json:"tag,omitempty"`
 }
 
 // User 一个共享用户；同 uuid 多个 key 共享同一额度。
@@ -496,6 +512,8 @@ func objectRawPricing(data []byte) map[string]RawPrice {
 				rp.CachedReadPerMillion = s
 			case "cached_write_per_million":
 				rp.CachedWritePerMillion = s
+			case "tag":
+				rp.Tag = strings.Trim(s, "\"")
 			}
 		}
 		out[ks] = rp

@@ -6,6 +6,8 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 - 透明反代：仅替换认证头，请求体原样转发
 - 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
+- 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
+- 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
 - 总池保护：以上游实时余量接口为准，额度用尽即 429
 - 流式请求照常计费（自动注入 include_usage，兼容 OpenAI / Anthropic 协议）
 - SQLite 记录全部用量
@@ -59,9 +61,32 @@ go build -o opgo.exe .
 | balance_interval_seconds | 余量同步间隔，默认 120 |
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
-| pricing | 模型单价（每百万 token）+ context_length（上下文长度）+ max_output_tokens（最大输出 token）+ modality（模态，可省略，默认 text->text） |
+| pricing | 模型单价（每百万 token，config 填谷时价）+ context_length + max_output_tokens + modality + transformation + tag（前端模型名右侧标签，可空） |
 | boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
+
+## 峰谷时（peak）
+
+peak 配置在**模型内**（pricing 每个模型条目中），只有配置了 peak 的模型才启用峰谷计价。**config 中填写谷时价格**，峰时自动按倍率加倍扣款，无需额外填写峰时价格。
+
+```json
+"deepseek-v4-flash": {
+  "input_per_million": 0.88, // 谷时价
+  "output_per_million": 2.64,
+  "cached_read_per_million": 0.028,
+  "cached_write_per_million": 0,
+  "peak": {
+    "enabled": true, // 是否启用（配置了 peak 默认启用）
+    "multiplier": 2, // 峰时倍率（默认 2）
+    "windows": [["01:00", "04:00"], ["06:00", "10:00"]] // 峰时时段（UTC，含起不含止）
+  }
+}
+```
+
+- 峰时窗口：01:00-04:00 与 06:00-10:00（UTC），其他时间为谷时；可自行修改 windows。
+- 未配置 `peak` 的模型始终按 config 价格计费（无峰谷）。
+- 可 `"enabled": false` 单独关闭某模型的峰谷。
+- 当前示例仅 DeepSeek 双模型配置了 peak：deepseek-v4-flash 谷时 $0.88/$2.64/$0.028，峰时自动按 $1.76/$5.28/$0.056 计费（官网 Off-Peak 价的 4 倍，峰时再翻倍）。
 
 ## 模型模态（modality）
 
@@ -70,13 +95,19 @@ go build -o opgo.exe .
 ```json
 "pricing": {
   "deepseek-v4-flash": {
-    "input_per_million": 0.14,
-    "output_per_million": 0.28,
-    "cached_read_per_million": 0.0028,
+    "input_per_million": 0.88,
+    "output_per_million": 2.64,
+    "cached_read_per_million": 0.028,
     "cached_write_per_million": 0,
     "context_length": 1000000,
     "max_output_tokens": 384000,
-    "modality": "text->text"
+    "modality": "text->text",
+    "tag": "高峰期2x消耗",
+    "peak": {
+      "enabled": true,
+      "multiplier": 2,
+      "windows": [["01:00", "04:00"], ["06:00", "10:00"]]
+    }
   },
   "mimo-v2.5": {
     "input_per_million": 0.14,

@@ -2,8 +2,10 @@ package meter
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"opgo/internal/config"
 )
@@ -188,4 +190,84 @@ func TestEnsureStreamUsagePreservesWhitespace(t *testing.T) {
 	if !strings.Contains(string(out), "\"model\":\"m\"") {
 		t.Error("原字段应保留")
 	}
+}
+
+func TestIsPeakTime(t *testing.T) {
+	windows := [][]string{{"01:00", "04:00"}, {"06:00", "10:00"}}
+	// 边界：00:59 off / 01:00 peak / 03:59 peak / 04:00 off
+	cases := []struct {
+		time string // "HH:MM" UTC
+		peak bool
+	}{
+		{"00:00", false}, {"00:59", false}, {"01:00", true}, {"01:30", true},
+		{"03:59", true}, {"04:00", false}, {"05:59", false}, {"06:00", true},
+		{"09:59", true}, {"10:00", false}, {"12:00", false}, {"23:59", false},
+	}
+	for _, c := range cases {
+		tm := parseTestTime(c.time)
+		got := IsPeakTime(tm, windows)
+		if got != c.peak {
+			t.Errorf("IsPeakTime(%s) = %v, want %v", c.time, got, c.peak)
+		}
+	}
+}
+
+func TestIsPeakTimeCrossMidnight(t *testing.T) {
+	windows := [][]string{{"22:00", "02:00"}}
+	if !IsPeakTime(parseTestTime("23:00"), windows) {
+		t.Error("23:00 should be peak (cross-midnight window)")
+	}
+	if !IsPeakTime(parseTestTime("01:00"), windows) {
+		t.Error("01:00 should be peak (cross-midnight window)")
+	}
+	if IsPeakTime(parseTestTime("21:00"), windows) {
+		t.Error("21:00 should be off-peak")
+	}
+	if IsPeakTime(parseTestTime("03:00"), windows) {
+		t.Error("03:00 should be off-peak")
+	}
+}
+
+func TestApplyPeak(t *testing.T) {
+	trueVal := true
+	falseVal := false
+	windows := [][]string{{"01:00", "04:00"}, {"06:00", "10:00"}}
+	peak := &config.ModelPeak{Enabled: &trueVal, Multiplier: 2, Windows: windows}
+	price := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: peak}
+	// 峰时：翻倍
+	p := ApplyPeak(price, "deepseek-v4-flash", parseTestTime("02:00"))
+	if p.InputPerMillion != 1.76 || p.OutputPerMillion != 5.28 || p.CachedReadPerMillion != 0.056 {
+		t.Errorf("peak price not doubled: %+v", p)
+	}
+	// 谷时：不变
+	p = ApplyPeak(price, "deepseek-v4-flash", parseTestTime("12:00"))
+	if p.InputPerMillion != 0.88 || p.OutputPerMillion != 2.64 || p.CachedReadPerMillion != 0.028 {
+		t.Errorf("off-peak price changed: %+v", p)
+	}
+	// 未配置 peak 的模型峰时不变
+	noPeak := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028}
+	p = ApplyPeak(noPeak, "mimo-v2.5", parseTestTime("02:00"))
+	if p.InputPerMillion != 0.88 {
+		t.Errorf("model without peak config changed in peak: %+v", p)
+	}
+	// enabled=false 时不变
+	disabled := &config.ModelPeak{Enabled: &falseVal, Multiplier: 2, Windows: windows}
+	dPrice := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: disabled}
+	p = ApplyPeak(dPrice, "deepseek-v4-flash", parseTestTime("02:00"))
+	if p.InputPerMillion != 0.88 {
+		t.Errorf("peak disabled but price changed: %+v", p)
+	}
+	// 未填 multiplier 默认 2 倍
+	noMult := &config.ModelPeak{Enabled: &trueVal, Windows: windows}
+	mPrice := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: noMult}
+	p = ApplyPeak(mPrice, "deepseek-v4-flash", parseTestTime("02:00"))
+	if p.InputPerMillion != 1.76 {
+		t.Errorf("default multiplier not applied: %+v", p)
+	}
+}
+
+func parseTestTime(hhmm string) time.Time {
+	h, m := 0, 0
+	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
+	return time.Date(2026, 1, 1, h, m, 0, 0, time.UTC)
 }

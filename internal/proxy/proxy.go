@@ -410,6 +410,8 @@ func mergeUsage(acc *meter.Usage, u meter.Usage) {
 }
 
 func (p *Proxy) recordUsage(user *config.User, key, model, endpoint string, u meter.Usage, price config.ModelPricing, now time.Time) {
+	// 峰谷时：模型级 peak 配置，峰时自动乘倍率（config 中为谷时价格）。
+	price = meter.ApplyPeak(price, model, now)
 	cost := meter.CostUnits(price, u)
 	mu := p.lockFor(user.UUID)
 	mu.Lock()
