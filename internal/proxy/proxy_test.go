@@ -988,20 +988,40 @@ func TestBoostTriggersAndRaisesLimit(t *testing.T) {
 		t.Errorf("percent 应按原限额显示 ≈95, got %v", w["percent"])
 	}
 
-	// 提额后用到 1.2L（<1.5L）放行；同周期不再重复提额（boost_limit 仍 3.6）
+	// 提额后用到 1.2L（1.2L < 90%×3.6=3.24，未达下一级触发点）：放行且不再提额
 	seedUnits(t, db, "uuid-1", 2.4*0.25) // 累计 1.2L
 	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
 		t.Fatalf("1.2L status = %d: %s, want 200", st, body)
 	}
 	w2 := apiWindow(t, srv, testUser1, "5h")
 	if bl, _ := w2["boost_limit"].(float64); bl != 3.6 {
-		t.Errorf("同周期不应重复提额, boost_limit = %v", w2["boost_limit"])
+		t.Errorf("未达下一级触发点不应再提额, boost_limit = %v", w2["boost_limit"])
 	}
 
-	// 1.6L > 1.5L → 429
+	// 1.6L（3.84 ≥ 90%×3.6=3.24）→ 第二次智能提额到 5.4，请求放行
 	seedUnits(t, db, "uuid-1", 2.4*0.4) // 累计 1.6L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("1.6L status = %d: %s, want 200（触发第二次提额）", st, body)
+	}
+	w3 := apiWindow(t, srv, testUser1, "5h")
+	if bl, _ := w3["boost_limit"].(float64); bl != 5.4 {
+		t.Errorf("第二次提额 boost_limit = %v, want 5.4", w3["boost_limit"])
+	}
+
+	// 累计 2.3L（5.52 ≥ 90%×5.4=4.86）→ 第三次提额到 8.1，放行
+	seedUnits(t, db, "uuid-1", 2.4*0.7) // 累计 2.3L
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("2.3L status = %d: %s, want 200（触发第三次提额）", st, body)
+	}
+	w4 := apiWindow(t, srv, testUser1, "5h")
+	if bl, _ := w4["boost_limit"].(float64); bl != 8.1 {
+		t.Errorf("第三次提额 boost_limit = %v, want 8.1", w4["boost_limit"])
+	}
+
+	// 累计 8.4 > 8.1 第三级硬卡 → 429
+	seedUnits(t, db, "uuid-1", 8.4-5.52) // 累计 8.4
 	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
-		t.Fatalf("1.6L status = %d: %s, want 429（超提额硬卡）", st, body)
+		t.Fatalf("8.4 status = %d: %s, want 429（超第三级提额硬卡）", st, body)
 	}
 }
 
@@ -1055,6 +1075,114 @@ func TestBoostResetAllowsReBoost(t *testing.T) {
 	}
 }
 
+// 多次智能提额：每级触发条件与提额逻辑完全一样（used ≥ 90%×当前档 → 提到 150%×当前档）。
+// 三级：L=2.4 → 3.6 → 5.4 → 8.1；池子与跨窗口健康每次都要满足。
+func TestBoostMultipleLevels(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 第 1 级：seed 0.95L（≥ 90%×2.4）→ 提到 3.6
+	seedUnits(t, db, "uuid-1", 2.4*0.95)
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("L1 status = %d: %s", st, body)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("L1 应提额")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 3.6 {
+		t.Fatalf("L1 boost_limit = %v, want 3.6", w["boost_limit"])
+	}
+
+	// 未达下一级触发点（3.24）前不再提额：seed 到 3.0
+	seedUnits(t, db, "uuid-1", 3.0-2.4*0.95) // 累计 3.0
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("3.0 status = %d, want 200", st)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("3.0 仍应处于提额状态")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 3.6 {
+		t.Fatalf("未达 L2 触发点, boost_limit = %v, want 3.6", w["boost_limit"])
+	}
+
+	// 第 2 级：累计 3.24（≥ 90%×3.6）→ 提到 5.4
+	seedUnits(t, db, "uuid-1", 0.24) // 累计 3.24
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("L2 status = %d, want 200", st)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("L2 应再次提额")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 5.4 {
+		t.Fatalf("L2 boost_limit = %v, want 5.4", w["boost_limit"])
+	}
+
+	// 第 3 级：累计 4.86（≥ 90%×5.4）→ 提到 8.1
+	seedUnits(t, db, "uuid-1", 4.86-3.24) // 累计 4.86
+	if st, _, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("L3 status = %d, want 200", st)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("L3 应第三次提额")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 8.1 {
+		t.Fatalf("L3 boost_limit = %v, want 8.1", w["boost_limit"])
+	}
+
+	// 百分比永远按原限额显示：4.86/2.4 = 202.5%
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("最终仍应处于提额状态")
+	} else if pct, _ := w["percent"].(float64); pct < 201 || pct > 204 {
+		t.Errorf("percent 应按原限额 2.4 显示 ≈202.5, got %v", w["percent"])
+	}
+
+	// 8.4 > 8.1 第三级硬卡 → 429
+	seedUnits(t, db, "uuid-1", 8.4-4.86) // 累计 8.4
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
+		t.Fatalf("8.4 status = %d: %s, want 429（超第三级硬卡）", st, body)
+	}
+}
+// max_boost_times=1：每周期最多提额一次，提到 3.6 后即使再次达到 90%×3.6 也不再提额，
+// 超过 3.6 即 429；重置后可重新提额一次。
+func TestBoostMaxTimesLimit(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		c.Boost = boostCfg()
+		c.Boost.MaxBoostTimes = 1
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 第 1 级提额成功
+	seedUnits(t, db, "uuid-1", 2.4*0.95)
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("L1 status = %d: %s", st, body)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("L1 应提额")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 3.6 {
+		t.Fatalf("L1 boost_limit = %v, want 3.6", w["boost_limit"])
+	}
+
+	// 达到 90%×3.6=3.24 但次数已满：不再提额，请求在 3.6 内放行
+	seedUnits(t, db, "uuid-1", 3.3-2.4*0.95) // 累计 3.3
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("3.3 status = %d: %s, want 200（次数已满但未超 3.6）", st, body)
+	}
+	if w := apiWindow(t, srv, testUser1, "5h"); w["boosted"] != true {
+		t.Fatal("仍应处于已提额状态")
+	} else if bl, _ := w["boost_limit"].(float64); bl != 3.6 {
+		t.Fatalf("次数已满不应再提额, boost_limit = %v, want 3.6", w["boost_limit"])
+	}
+
+	// 超 3.6 → 429（次数已满无法再提额）
+	seedUnits(t, db, "uuid-1", 0.31) // 累计 3.61
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 429 {
+		t.Fatalf("3.61 status = %d: %s, want 429（超过 max_boost_times 后的硬卡）", st, body)
+	}
+}
 // ---- 最小干预透传测试 ----
 
 // TestForwardPassThroughHeaders 验证：除认证外，UA 与自定义头原样透传到上游，

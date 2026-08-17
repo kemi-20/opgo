@@ -112,8 +112,10 @@ type User struct {
 
 // Boost 临期额度机制（可选）。
 // enabled 时：正常硬卡 = 限额×BaseOveragePercent/100（防对话中途断）；
-// 某窗口 used ≥ TriggerPercent%×L 且满足池子/跨窗口健康时，智能提额到
-// BoostPercent%×L（105% 不叠加），提额状态只存在内存，按 resetsAt 周期对齐。
+// 某窗口 used ≥ TriggerPercent%×当前档限额 且满足池子/跨窗口健康时，智能提额到
+// BoostPercent%×当前档限额（第 1 次 = 150%×L，第 2 次 = 150%×150%×L …，可多次提额），
+// MaxBoostTimes 限制每个周期最多提额次数（0 = 不限），
+// 提额状态只存在内存，按 resetsAt 周期对齐，重置后从头开始。
 type Boost struct {
 	Enabled               bool `json:"enabled"`
 	BaseOveragePercent    int  `json:"base_overage_percent"`
@@ -121,9 +123,11 @@ type Boost struct {
 	BoostPercent          int  `json:"boost_percent"`
 	PoolMaxPercent        int  `json:"pool_max_percent"`
 	OtherWindowMaxPercent int  `json:"other_window_max_percent"`
+	MaxBoostTimes         int  `json:"max_boost_times"` // 每个周期最多提额次数，0 = 不限
 }
 
 // BoostDefaults 返回默认值（未配置时合并到 0 值上，enabled 保持 false）。
+// MaxBoostTimes 默认 0 = 不限提额次数。
 func BoostDefaults() Boost {
 	return Boost{
 		BaseOveragePercent:    105,
@@ -131,6 +135,7 @@ func BoostDefaults() Boost {
 		BoostPercent:          150,
 		PoolMaxPercent:        85,
 		OtherWindowMaxPercent: 95,
+		MaxBoostTimes:         0,
 	}
 }
 
@@ -319,6 +324,9 @@ func (c *Config) validate() error {
 		}
 		if c.Boost.OtherWindowMaxPercent <= 0 || c.Boost.OtherWindowMaxPercent > 100 {
 			return errors.New("boost.other_window_max_percent 必须在 (0,100] 区间")
+		}
+		if c.Boost.MaxBoostTimes < 0 {
+			return errors.New("boost.max_boost_times 不能为负数（0 = 不限次数）")
 		}
 	}
 	if c.UpstreamBase == "" {

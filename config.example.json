@@ -6,12 +6,13 @@
   "balance_interval_seconds": 120,
   "rate_limit_per_minute": 60,
   "boost": {
-    "enabled": true,
-    "base_overage_percent": 105,
-    "trigger_percent": 90,
-    "boost_percent": 150,
-    "pool_max_percent": 85,
-    "other_window_max_percent": 95
+    "enabled": true, // 是否启用临期智能提额（提额状态仅存内存，重启后重新判断）
+    "base_overage_percent": 105, // 正常硬卡 = 限额×105%（后台缓冲，防对话中途断；前端不显示）
+    "trigger_percent": 90, // used ≥ 90%×当前档限额 时尝试提额
+    "boost_percent": 150, // 提额到 当前档限额×150%（可多次提额：第1次150%×L，第2次150%×150%×L…）
+    "pool_max_percent": 85, // 每次提额都要求总池实时余量 < 85%
+    "other_window_max_percent": 95, // 每次提额都要求其他两个窗口 used/限额 < 95%
+    "max_boost_times": 0 // 每个重置周期最多智能提额次数（0 = 不限；如 3 = 最多提到 150%^3×L）
   },
   "limits_per_user": {
     "5h": 2.40,

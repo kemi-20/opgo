@@ -455,8 +455,7 @@ func (p *Proxy) userLimitExceeded(u *config.User, snap *balance.Snapshot, now ti
 			p.log.Error("查询个人用量失败", "err", err)
 			continue
 		}
-		boosted := p.boost.boosted(u.UUID, period.Name, snap.Cap(period.Name).ResetsAt.Unix())
-		hard := p.hardLimit(c, lim, boosted)
+		hard := p.hardLimitFor(c, u.UUID, period.Name, lim, snap.Cap(period.Name).ResetsAt.Unix())
 		if used >= meter.USDToUnits(hard) {
 			return fmt.Sprintf("个人额度（%s）", period.Name), true
 		}
@@ -584,9 +583,11 @@ func (p *Proxy) windowsReport(uuid string, limits map[string]float64, snap *bala
 				// 百分比永远按 config 原版限额计算
 				pct := wi.Used / wi.Limit * 100
 				wi.Percent = &pct
-				if c.Boost.Enabled && p.boost.boosted(uuid, period.Name, capInfo.ResetsAt.Unix()) {
-					wi.Boosted = true
-					wi.BoostLimit = wi.Limit * float64(c.Boost.BoostPercent) / 100
+				if c.Boost.Enabled {
+					if cur, _, ok := p.boost.state(uuid, period.Name, capInfo.ResetsAt.Unix()); ok {
+						wi.Boosted = true
+						wi.BoostLimit = cur
+					}
 				}
 			}
 		}
