@@ -122,8 +122,10 @@ func TestConvertCompletionsToResponsesRequest(t *testing.T) {
 	if obj["model"] != "mimo-v2.5" {
 		t.Errorf("model = %v", obj["model"])
 	}
-	if inc, _ := obj["include"].([]any); len(inc) != 1 || inc[0] != "usage" {
-		t.Errorf("include = %v", obj["include"])
+	// 注意：上游（gpt-5.6-luna）拒绝 include:["usage"]（400），且默认就在响应中返回 usage，
+	// 因此转换到 Responses 时不再注入 include（参考 CLIProxyAPI 亦不注入 usage include）。
+	if _, ok := obj["include"]; ok {
+		t.Errorf("include 不应出现（上游拒绝 include:usage）: %v", obj["include"])
 	}
 	input, _ := obj["input"].([]any)
 	if len(input) != 1 {
@@ -260,16 +262,15 @@ func TestStreamCompletionsToAnthropic(t *testing.T) {
 		[]byte(`data: [DONE]`),
 	}
 	var all []string
-	done := false
 	for _, l := range lines {
-		chunks, d := conv.Feed(l)
-		done = d
+		chunks, _ := conv.Feed(l)
 		for _, c := range chunks {
 			all = append(all, string(c))
 		}
 	}
-	if !done {
-		all = append(all, string(conv.Close()[0]))
+	// 与 proxy 行为一致：循环结束后统一调用 Close() 补齐终止事件
+	for _, c := range conv.Close() {
+		all = append(all, string(c))
 	}
 	joined := strings.Join(all, "")
 	for _, want := range []string{`"type":"message_start"`, `"type":"thinking"`, `"thinking_delta"`, `"text_delta"`, `"type":"message_delta"`, `"type":"message_stop"`} {
@@ -293,16 +294,15 @@ func TestStreamAnthropicToCompletions(t *testing.T) {
 		[]byte(`data: {"type":"message_stop"}`),
 	}
 	var all []string
-	done := false
 	for _, l := range lines {
-		chunks, d := conv.Feed(l)
-		done = d
+		chunks, _ := conv.Feed(l)
 		for _, c := range chunks {
 			all = append(all, string(c))
 		}
 	}
-	if !done {
-		all = append(all, string(conv.Close()[0]))
+	// 与 proxy 行为一致：循环结束后统一调用 Close() 补齐终止事件
+	for _, c := range conv.Close() {
+		all = append(all, string(c))
 	}
 	joined := strings.Join(all, "")
 	for _, want := range []string{`"reasoning_content":"think"`, `"content":"hi"`, `"finish_reason":"stop"`, `data: [DONE]`} {
@@ -517,7 +517,7 @@ func TestConvertRequestForcesIncludeUsage(t *testing.T) {
 	if !ok || so["include_usage"] != true {
 		t.Errorf("→completions 流式应注入 stream_options.include_usage: %s", out)
 	}
-	// anthropic 非流式 → responses：必须带 include:["usage"]
+	// anthropic 非流式 → responses：不再注入 include（上游拒绝 include:usage，且默认返回 usage）
 	raw2 := []byte(`{"model":"mimo-v2.5","messages":[{"role":"user","content":"hi"}]}`)
 	out2, err := ConvertRequest(FormatAnthropic, FormatOpenAIResponses, raw2)
 	if err != nil {
@@ -525,15 +525,8 @@ func TestConvertRequestForcesIncludeUsage(t *testing.T) {
 	}
 	var obj2 map[string]any
 	_ = json.Unmarshal(out2, &obj2)
-	inc, _ := obj2["include"].([]any)
-	found := false
-	for _, i := range inc {
-		if i == "usage" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("→responses 应注入 include:[\"usage\"]: %s", out2)
+	if _, ok := obj2["include"]; ok {
+		t.Errorf("→responses 不应注入 include: %s", out2)
 	}
 }
 

@@ -3,8 +3,10 @@ package translate
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
-	"github.com/google/uuid")
+	"github.com/google/uuid"
+)
 
 // ---------- OpenAI chat/completions 非流式响应解析 ----------
 
@@ -14,8 +16,8 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 		Model   string `json:"model"`
 		Created int64  `json:"created"`
 		Choices []struct {
-			Index        int `json:"index"`
-			Message      *struct {
+			Index   int `json:"index"`
+			Message *struct {
 				Role             string `json:"role"`
 				Content          any    `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
@@ -31,9 +33,9 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-			TotalTokens      int64 `json:"total_tokens"`
+			PromptTokens        int64 `json:"prompt_tokens"`
+			CompletionTokens    int64 `json:"completion_tokens"`
+			TotalTokens         int64 `json:"total_tokens"`
 			PromptTokensDetails *struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
@@ -108,18 +110,18 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 			Type    string `json:"type"`
 			Role    string `json:"role"`
 			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-				Annotations []any `json:"annotations"`
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				Annotations []any  `json:"annotations"`
 			} `json:"content"`
-			CallID string `json:"call_id"`
-			Name   string `json:"name"`
+			CallID    string          `json:"call_id"`
+			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"output"`
 		Usage *struct {
-			InputTokens      int64 `json:"input_tokens"`
-			OutputTokens     int64 `json:"output_tokens"`
-			TotalTokens      int64 `json:"total_tokens"`
+			InputTokens        int64 `json:"input_tokens"`
+			OutputTokens       int64 `json:"output_tokens"`
+			TotalTokens        int64 `json:"total_tokens"`
 			InputTokensDetails *struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"input_tokens_details"`
@@ -140,7 +142,9 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 		switch o.Type {
 		case "reasoning":
 			for _, c := range o.Content {
-				if c.Type == "summary_text" {
+				// 原生 responses 的 reasoning item content 是 reasoning_text；
+				// 部分实现（含上游回显）用 summary_text，两者都读。
+				if c.Type == "summary_text" || c.Type == "reasoning_text" {
 					reasoning.WriteString(c.Text)
 				}
 			}
@@ -205,18 +209,18 @@ func parseAnthropicResponse(raw []byte) (*Response, error) {
 		Model      string `json:"model"`
 		StopReason string `json:"stop_reason"`
 		Content    []struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			Thinking string `json:"thinking"`
-			ID       string `json:"id"`
-			Name     string `json:"name"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
 			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage *struct {
-			InputTokens      int64 `json:"input_tokens"`
-			OutputTokens     int64 `json:"output_tokens"`
-			CacheRead        int64 `json:"cache_read_input_tokens"`
-			CacheCreation    int64 `json:"cache_creation_input_tokens"`
+			InputTokens   int64 `json:"input_tokens"`
+			OutputTokens  int64 `json:"output_tokens"`
+			CacheRead     int64 `json:"cache_read_input_tokens"`
+			CacheCreation int64 `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -298,9 +302,9 @@ func buildOpenAICompletionsResponse(resp *Response) ([]byte, error) {
 	hasUsage := resp.Usage.TotalTokens > 0 || resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
 	if hasUsage {
 		u := map[string]any{
-			"prompt_tokens": resp.Usage.PromptTokens,
+			"prompt_tokens":     resp.Usage.PromptTokens,
 			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens": resp.Usage.TotalTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
 		}
 		if resp.Usage.CachedTokens > 0 || resp.Usage.CachedWriteTokens > 0 {
 			u["prompt_tokens_details"] = map[string]any{"cached_tokens": resp.Usage.CachedTokens}
@@ -314,23 +318,53 @@ func buildOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	return buildOpenAIResponsesResponseMeta(resp, nil)
 }
 
+// responsesNonStreamResponse 非流式 Responses 响应对象：字段顺序与上游原生一致。
+type responsesNonStreamResponse struct {
+	ID                   string `json:"id"`
+	Object               string `json:"object"`
+	CreatedAt            int64  `json:"created_at"`
+	CompletedAt          int64  `json:"completed_at"`
+	Status               string `json:"status"`
+	ParallelToolCalls    bool   `json:"parallel_tool_calls"`
+	Temperature          any    `json:"temperature"`
+	TopP                 any    `json:"top_p"`
+	MaxOutputTokens      any    `json:"max_output_tokens"`
+	PreviousResponseID   any    `json:"previous_response_id"`
+	Background           bool   `json:"background"`
+	Truncation           string `json:"truncation"`
+	TopLogprobs          int    `json:"top_logprobs"`
+	MaxToolCalls         any    `json:"max_tool_calls"`
+	PromptCacheRetention any    `json:"prompt_cache_retention"`
+	Model                string `json:"model"`
+	Error                any    `json:"error"`
+	IncompleteDetails    any    `json:"incomplete_details"`
+	Output               []any  `json:"output"`
+	Usage                any    `json:"usage"`
+	Instructions         any    `json:"instructions"`
+	ToolChoice           any    `json:"tool_choice"`
+	Tools                []any  `json:"tools"`
+	Reasoning            any    `json:"reasoning"`
+	Text                 any    `json:"text"`
+	Moderation           any    `json:"moderation"`
+	Cost                 string `json:"cost"`
+}
+
 func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, error) {
-	output := make([]map[string]any, 0, 4)
-	// reasoning（对齐原生：status + content + summary）
+	output := make([]any, 0, 4)
+	// reasoning（对齐原生：content 为 reasoning_text，summary 为空数组）
 	if len(resp.Choices) > 0 && resp.Choices[0].Reasoning != "" {
-		output = append(output, map[string]any{
-			"type": "reasoning", "id": "rs_" + resp.ID, "status": "completed",
-			"content": []map[string]any{{"type": "reasoning_text", "text": resp.Choices[0].Reasoning, "annotations": []any{}}},
-			"summary": []map[string]any{{"type": "summary_text", "text": resp.Choices[0].Reasoning, "annotations": []any{}}},
+		output = append(output, responsesReasoningItem{
+			ID: "rs_" + resp.ID, Type: "reasoning", Status: "completed",
+			Content: []responsesReasoningContentPart{{Type: "reasoning_text", Text: resp.Choices[0].Reasoning}},
+			Summary: []any{},
 		})
 	}
 	for _, c := range resp.Choices {
 		if c.Text != "" || len(c.ToolCalls) == 0 {
-			msg := map[string]any{
-				"type": "message", "id": "msg_" + resp.ID, "status": "completed", "role": "assistant", "phase": "final_answer",
-				"content": []map[string]any{{"type": "output_text", "text": c.Text, "annotations": []any{}}},
-			}
-			output = append(output, msg)
+			output = append(output, responsesMessageItem{
+				ID: "msg_" + resp.ID, Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer",
+				Content: []responsesMessageContentPart{{Type: "output_text", Text: c.Text, Annotations: []any{}, Logprobs: []any{}}},
+			})
 		}
 		for _, tc := range c.ToolCalls {
 			argsStr := tc.Arguments
@@ -338,74 +372,80 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 				argsStr = "{}"
 			}
 			// item id 用独立 UUID，call_id 保留上游工具调用 ID（对齐原生 responses）
-			output = append(output, map[string]any{
-				"type": "function_call", "id": uuid.NewString(), "call_id": tc.ID,
-				"status": "completed",
-				"name": tc.Name, "arguments": argsStr,
+			output = append(output, responsesFunctionCallItem{
+				ID: uuid.NewString(), Type: "function_call", Status: "completed",
+				Name: tc.Name, CallID: tc.ID, Arguments: argsStr,
 			})
 		}
 	}
-	out := map[string]any{
-		"id": orDefault(resp.ID, "resp_opgo"), "object": "response",
-		"created_at": resp.Created, "completed_at": resp.Created,
-		"status": "completed", "model": resp.Model, "output": output,
-		"parallel_tool_calls": true, "truncation": "disabled",
-		"top_logprobs": 0, "max_tool_calls": nil,
-		"error": nil, "incomplete_details": nil,
-		"previous_response_id": nil, "background": false,
-		"prompt_cache_retention": nil,
-		"temperature": 1, "top_p": 1,
-		"instructions": nil, "tool_choice": "auto",
-		"reasoning": map[string]any{"effort": nil, "summary": nil},
-		"text": map[string]any{"verbosity": nil, "format": map[string]any{"type": "text"}},
-		"moderation": nil, "cost": "0",
+	// 与原生一致：usage 的 input/output 详情对象始终存在（无则 0）
+	hasUsage := resp.Usage.TotalTokens > 0 || resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
+	var usage any
+	if hasUsage {
+		usage = responsesUsageObj{
+			InputTokens:         resp.Usage.PromptTokens,
+			OutputTokens:        resp.Usage.CompletionTokens,
+			TotalTokens:         resp.Usage.TotalTokens,
+			InputTokensDetails:  responsesInputTokensDetails{CachedTokens: resp.Usage.CachedTokens},
+			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: resp.Usage.CachedWriteTokens},
+		}
 	}
+	temp := any(1)
+	topp := any(1)
+	var maxOut any
+	toolChoice := any("auto")
+	parallel := true
+	instructions := any(nil)
+	reasoning := any(map[string]any{"effort": nil, "summary": nil})
+	tools := []any{}
 	if meta != nil {
 		if meta.Temperature != nil {
-			out["temperature"] = *meta.Temperature
+			temp = *meta.Temperature
 		}
 		if meta.TopP != nil {
-			out["top_p"] = *meta.TopP
+			topp = *meta.TopP
 		}
 		if meta.MaxTokens != nil {
-			out["max_output_tokens"] = *meta.MaxTokens
-		}
-		if meta.ParallelToolCalls != nil {
-			out["parallel_tool_calls"] = *meta.ParallelToolCalls
+			maxOut = *meta.MaxTokens
 		}
 		if meta.ToolChoice != nil {
-			out["tool_choice"] = meta.ToolChoice
+			toolChoice = meta.ToolChoice
 		}
-		if len(meta.Tools) > 0 {
-			tools := make([]map[string]any, 0, len(meta.Tools))
-			for _, t := range meta.Tools {
-				tools = append(tools, map[string]any{
-					"type": "function", "name": t.Name, "description": t.Description,
-					"parameters": t.Parameters,
-				})
-			}
-			out["tools"] = tools
+		if meta.ParallelToolCalls != nil {
+			parallel = *meta.ParallelToolCalls
 		}
 		if meta.Instructions != "" {
-			out["instructions"] = meta.Instructions
+			instructions = meta.Instructions
 		} else if len(meta.System) > 0 {
-			out["instructions"] = blocksToText(meta.System)
+			instructions = blocksToText(meta.System)
+		}
+		if len(meta.Tools) > 0 {
+			for _, t := range meta.Tools {
+				tools = append(tools, responsesToolEcho{
+					Type: "function", Name: t.Name, Description: t.Description, Strict: nil,
+					Parameters: json.RawMessage(t.Parameters),
+				})
+			}
 		}
 		if meta.ReasoningEffort != "" {
-			out["reasoning"] = map[string]any{"effort": meta.ReasoningEffort, "summary": nil}
+			reasoning = map[string]any{"effort": meta.ReasoningEffort, "summary": nil}
 		}
 	}
-	hasUsage := resp.Usage.TotalTokens > 0 || resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
-	if hasUsage {
-		u := map[string]any{
-			"input_tokens": resp.Usage.PromptTokens,
-			"output_tokens": resp.Usage.CompletionTokens,
-			"total_tokens": resp.Usage.TotalTokens,
-		}
-		if resp.Usage.CachedTokens > 0 {
-			u["input_tokens_details"] = map[string]any{"cached_tokens": resp.Usage.CachedTokens}
-		}
-		out["usage"] = u
+	created := resp.Created
+	if created == 0 {
+		created = time.Now().Unix()
+	}
+	out := responsesNonStreamResponse{
+		ID: orDefault(resp.ID, "resp_opgo"), Object: "response",
+		CreatedAt: created, CompletedAt: created, Status: "completed",
+		ParallelToolCalls: parallel, Temperature: temp, TopP: topp,
+		MaxOutputTokens: maxOut, PreviousResponseID: nil, Background: false,
+		Truncation: "disabled", TopLogprobs: 0, MaxToolCalls: nil, PromptCacheRetention: nil,
+		Model: resp.Model, Error: nil, IncompleteDetails: nil,
+		Output: output, Usage: usage, Instructions: instructions,
+		ToolChoice: toolChoice, Tools: tools, Reasoning: reasoning,
+		Text:       responsesTextObj{Verbosity: nil, Format: responsesTextFormatObj{Type: "text"}},
+		Moderation: nil, Cost: "0",
 	}
 	return json.Marshal(out)
 }
@@ -438,7 +478,7 @@ func buildAnthropicResponse(resp *Response) ([]byte, error) {
 	hasUsage := resp.Usage.TotalTokens > 0 || resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
 	if hasUsage {
 		u := map[string]any{
-			"input_tokens": resp.Usage.PromptTokens,
+			"input_tokens":  resp.Usage.PromptTokens,
 			"output_tokens": resp.Usage.CompletionTokens,
 		}
 		if resp.Usage.CachedTokens > 0 {

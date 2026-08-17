@@ -181,7 +181,7 @@ function fillPricing(container, pricing) {
   if (!pricing || !pricing.length) { return; }
   var note = document.createElement("div");
   note.className = "sub";
-  note.textContent = "价格为每百万 token（config 原版精度）";
+  note.textContent = "价格为每百万 token（高峰时段为北京时间 9:00 - 12:00、14:00 - 18:00）";
   container.appendChild(note);
   var table = document.createElement("table");
   var thead = document.createElement("thead");

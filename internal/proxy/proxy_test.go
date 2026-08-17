@@ -1445,3 +1445,36 @@ func TestTransformStreamUsageAfterClientDisconnect(t *testing.T) {
 		t.Errorf("sum = %d, want 2663", sum)
 	}
 }
+
+
+// TestResponsesPassthroughNoStreamOptionsInjection 验证：/responses 透传不再注入
+// chat 专用的 stream_options（此前会把该字段塞进 Responses 请求体，客户端若同时
+// 带 include 会触发上游 400）。Responses 透传应保持请求体原样（仅替换 auth）。
+func TestResponsesPassthroughNoStreamOptionsInjection(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["gpt-5.6-luna"]
+		pr.Transformation = "openai_responses"
+		c.Pricing["gpt-5.6-luna"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 客户端 Responses + include:["usage"]（此前会原样透传 + 再注入 stream_options；
+	// 上游 gpt-5.6-luna 会因 include 返回 400 —— 这是上游限制，但我们至少不应再注入
+	// 错误的 stream_options 字段）
+	body := `{"model":"gpt-5.6-luna","stream":true,"include":["usage"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+	st, _, _ := doReq(t, srv, "POST", "/v1/responses", testUser1, body)
+	if st != 200 {
+		t.Fatalf("status = %d", st)
+	}
+	if strings.Contains(string(fu.lastBody), "stream_options") {
+		t.Errorf("/responses 透传不应注入 stream_options: %s", fu.lastBody)
+	}
+	// 请求体其余部分原样
+	if string(fu.lastBody) != body {
+		t.Errorf("/responses 透传应保持请求体原样: got %s", fu.lastBody)
+	}
+}

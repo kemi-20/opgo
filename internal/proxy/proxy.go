@@ -246,8 +246,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		}
 		body = nb
 		upstreamPath = translate.FormatPath(dstFormat)
-	} else if hasPrice && !strings.HasSuffix(r.URL.Path, "/messages") {
-		// 流式 usage 注入（仅 OpenAI 风格端点；Anthropic /messages 不注入）。
+	} else if hasPrice && strings.HasSuffix(r.URL.Path, "/chat/completions") {
+		// 流式 usage 注入（仅 chat/completions 透传；Responses /responses 不能用
+		// stream_options —— 该字段是 chat 专用，且上游默认就在 response.completed
+		// 中返回 usage，因此 /responses 不注入）。
 		if nb, changed := meter.EnsureStreamUsage(body); changed {
 			body = nb
 		}
@@ -288,7 +290,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 		var conv *translate.StreamConverter
 		if transformEnabled {
-			conv = translate.NewStreamConverter(dstFormat, srcFormat, model)
+			conv = translate.NewStreamConverter(dstFormat, srcFormat, model, reqMeta)
 		}
 		p.streamCopy(w, r, resp, user, key, model, price, now, conv)
 		return
@@ -383,13 +385,13 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 			continue
 		}
 		if done {
-			if !writeChunks(conv.Close()) {
-				discard = true
-				continue
-			}
-			conv = nil // 已关闭，不再补
 			break
 		}
+	}
+	// 循环结束（done 或 EOF）：统一补齐一次终止事件（[DONE] / message_stop / ping）。
+	// Feed(done) 后 writer 不再自行输出终止事件，因此 Close() 只调用一次不会重复。
+	if conv != nil {
+		writeChunks(conv.Close())
 	}
 	if got && model != "" {
 		p.recordUsage(user, key, model, r.URL.Path, acc, price, now)

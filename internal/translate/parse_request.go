@@ -27,18 +27,24 @@ func parseOpenAICompletionsRequest(raw []byte) (*Request, error) {
 		StreamOptions *struct {
 			IncludeUsage *bool `json:"include_usage"`
 		} `json:"stream_options"`
-		ReasoningEffort string `json:"reasoning_effort"`
+		ReasoningEffort   string          `json:"reasoning_effort"`
+		ToolChoice        json.RawMessage `json:"tool_choice"`
+		ParallelToolCalls *bool           `json:"parallel_tool_calls"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, errf("解析 openai_completions 请求失败: %w", err)
 	}
 	req := &Request{
-		Model:           obj.Model,
-		Stream:          obj.Stream,
-		MaxTokens:       obj.MaxTokens,
-		Temperature:     obj.Temperature,
-		TopP:            obj.TopP,
-		ReasoningEffort: obj.ReasoningEffort,
+		Model:             obj.Model,
+		Stream:            obj.Stream,
+		MaxTokens:         obj.MaxTokens,
+		Temperature:       obj.Temperature,
+		TopP:              obj.TopP,
+		ReasoningEffort:   obj.ReasoningEffort,
+		ParallelToolCalls: obj.ParallelToolCalls,
+	}
+	if len(obj.ToolChoice) > 0 && string(obj.ToolChoice) != "null" {
+		req.ToolChoice = json.RawMessage(obj.ToolChoice)
 	}
 	if req.MaxTokens == nil {
 		req.MaxTokens = obj.MaxCompletion
@@ -97,8 +103,15 @@ func rebuildOpenAIMessage(role string, m map[string]any) Message {
 				id, _ := tcm["id"].(string)
 				fn, _ := tcm["function"].(map[string]any)
 				name, _ := fn["name"].(string)
-				args, _ := json.Marshal(fn["arguments"])
-				msg.Content = append(msg.Content, Block{Type: "tool_use", ToolUseID: id, Name: name, Input: args})
+				var argsRaw json.RawMessage
+				if s, ok := fn["arguments"].(string); ok {
+					// function.arguments 是 JSON 字符串字面量（如 {"command":"echo hi"}），
+					// 直接作为原始字节，避免 json.Marshal 二次转义产生反斜杠。
+					argsRaw = json.RawMessage(s)
+				} else {
+					argsRaw, _ = json.Marshal(fn["arguments"])
+				}
+				msg.Content = append(msg.Content, Block{Type: "tool_use", ToolUseID: id, Name: name, Input: argsRaw})
 			}
 		}
 	}
@@ -162,10 +175,10 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 		Reasoning *struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning"`
-		Instructions     string          `json:"instructions"`
-		ToolChoice       json.RawMessage `json:"tool_choice"`
-		ParallelToolCalls *bool          `json:"parallel_tool_calls"`
-		Include          []string        `json:"include"`
+		Instructions      string          `json:"instructions"`
+		ToolChoice        json.RawMessage `json:"tool_choice"`
+		ParallelToolCalls *bool           `json:"parallel_tool_calls"`
+		Include           []string        `json:"include"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, errf("解析 openai_responses 请求失败: %w", err)
@@ -219,6 +232,25 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 			// 上游会重复调用同一个工具（表现为"只调工具不输出/死循环"）。
 			if role == "" {
 				switch m["type"] {
+				case "reasoning":
+					// 顶层 reasoning 项 → assistant 思考块（历史中的思考内容）。
+					var summary string
+					if sum, ok := m["summary"].([]any); ok && len(sum) > 0 {
+						if first, ok := sum[0].(map[string]any); ok {
+							summary, _ = first["text"].(string)
+						}
+					}
+					if summary == "" {
+						if c, ok := m["content"].([]any); ok && len(c) > 0 {
+							if first, ok := c[0].(map[string]any); ok {
+								summary, _ = first["text"].(string)
+							}
+						}
+					}
+					if summary != "" {
+						req.Messages = append(req.Messages, Message{Role: "assistant", Content: []Block{{Type: "thinking", Thinking: summary}}})
+					}
+
 				case "function_call":
 					callID, _ := m["call_id"].(string)
 					if callID == "" {
@@ -242,14 +274,16 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 					}
 				case "function_call_output":
 					callID, _ := m["call_id"].(string)
-					output := ""
 					if s, ok := m["output"].(string); ok {
-						output = s
+						req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: callID, Text: s})
+					} else if arr, ok := m["output"].([]any); ok {
+						// 输出为 content parts 数组（含图片/音频）时保留为块，便于后续转 completions/responses。
+						req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: callID, Content: parseTextOrBlocks(arr)})
 					} else {
 						b, _ := json.Marshal(m["output"])
-						output = string(b)
+						req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: callID, Text: string(b)})
 					}
-					req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: callID, Text: output})
+
 				}
 				continue
 			}

@@ -1,11 +1,12 @@
 package translate
 
 import (
-	"github.com/google/uuid"
 	"bytes"
 	"encoding/json"
+	"github.com/google/uuid"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StreamEvent 流式转换的中间增量事件。
@@ -28,7 +29,8 @@ type StreamEvent struct {
 // streamReader 持有跨行状态。
 type streamReader struct {
 	// completions 状态
-	toolIdx int
+	toolIdx   int
+	toolHasID bool // 当前 tool index 是否已发出过带 id 的 tool_start（防重复 item）
 	// responses 状态
 	responseStarted bool
 	msgOutputID     string
@@ -57,14 +59,14 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 	}
 	var obj struct {
 		Choices []struct {
-			Index        int `json:"index"`
-			Delta        struct {
+			Index int `json:"index"`
+			Delta struct {
 				Role             string `json:"role"`
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 				Reasoning        string `json:"reasoning"`
 				ToolCalls        []struct {
-					Index    *int `json:"index"`
+					Index    *int   `json:"index"`
 					ID       string `json:"id"`
 					Function struct {
 						Name      string `json:"name"`
@@ -75,12 +77,15 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-			TotalTokens      int64 `json:"total_tokens"`
+			PromptTokens        int64 `json:"prompt_tokens"`
+			CompletionTokens    int64 `json:"completion_tokens"`
+			TotalTokens         int64 `json:"total_tokens"`
 			PromptTokensDetails *struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails *struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
@@ -105,12 +110,16 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 			}
 			if idx > r.toolIdx {
 				r.toolIdx = idx
+				r.toolHasID = tc.ID != ""
 				events = append(events, StreamEvent{Kind: "tool_start", ToolID: tc.ID, ToolName: tc.Function.Name})
 				if tc.Function.Arguments != "" {
 					events = append(events, StreamEvent{Kind: "tool_args", ToolID: tc.ID, Args: tc.Function.Arguments})
 				}
 			} else if r.toolIdx >= 0 {
-				if tc.ID != "" {
+				// 同一 index 的后续分片：只补发一次带 id 的 tool_start（部分上游 id 晚到），
+				// 避免同一工具调用生成两个 function_call item。
+				if tc.ID != "" && !r.toolHasID {
+					r.toolHasID = true
 					events = append(events, StreamEvent{Kind: "tool_start", ToolID: tc.ID, ToolName: tc.Function.Name})
 				}
 				if tc.Function.Arguments != "" {
@@ -131,6 +140,10 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 		if obj.Usage.PromptTokensDetails != nil {
 			u.CachedTokens = obj.Usage.PromptTokensDetails.CachedTokens
 		}
+		if obj.Usage.CompletionTokensDetails != nil {
+			// 复用 CachedWriteTokens 作为 reasoning_tokens 的载体（仅用于转换输出回显，不参与计费）
+			u.CachedWriteTokens = obj.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		events = append(events, StreamEvent{Kind: "usage", Usage: u})
 	}
 	return events
@@ -148,26 +161,26 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 		return nil
 	}
 	var obj struct {
-		Type    string `json:"type"`
-		Delta   string `json:"delta"`
-		Item    *struct {
-			Type     string `json:"type"`
-			Name     string `json:"name"`
-			CallID   string `json:"call_id"`
-			ID       string `json:"id"`
-			Role     string `json:"role"`
-			Content  []struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+		Item  *struct {
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			CallID  string `json:"call_id"`
+			ID      string `json:"id"`
+			Role    string `json:"role"`
+			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"item"`
 		Response *struct {
-			Status  string `json:"status"`
-			Usage   *struct {
-				InputTokens  int64 `json:"input_tokens"`
-				OutputTokens int64 `json:"output_tokens"`
-				TotalTokens  int64 `json:"total_tokens"`
+			Status string `json:"status"`
+			Usage  *struct {
+				InputTokens        int64 `json:"input_tokens"`
+				OutputTokens       int64 `json:"output_tokens"`
+				TotalTokens        int64 `json:"total_tokens"`
 				InputTokensDetails *struct {
 					CachedTokens int64 `json:"cached_tokens"`
 				} `json:"input_tokens_details"`
@@ -196,8 +209,12 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 				events = append(events, StreamEvent{Kind: "tool_start", ToolID: obj.Item.CallID, ToolName: obj.Item.Name})
 			}
 		}
-	case "response.reasoning_text.delta":
+	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 		events = append(events, StreamEvent{Kind: "reasoning", Reasoning: obj.Delta})
+	case "response.reasoning_summary_part.added":
+		events = append(events, StreamEvent{Kind: "start", Text: "reasoning"})
+	case "response.reasoning_summary_part.done":
+		// 保持块打开，直到 output_item.done 关闭（对齐原生语义）
 	case "response.output_text.delta":
 		events = append(events, StreamEvent{Kind: "text", Text: obj.Delta})
 	case "response.function_call_arguments.delta":
@@ -250,8 +267,8 @@ func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 		return nil
 	}
 	var obj struct {
-		Type    string `json:"type"`
-		Index   *int   `json:"index"`
+		Type         string `json:"type"`
+		Index        *int   `json:"index"`
 		ContentBlock *struct {
 			Type     string          `json:"type"`
 			Text     string          `json:"text"`
@@ -323,10 +340,10 @@ func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 		}
 		if obj.Usage != nil {
 			u := &Usage{
-				PromptTokens:     obj.Usage.InputTokens,
-				CompletionTokens: obj.Usage.OutputTokens,
-				TotalTokens:      obj.Usage.InputTokens + obj.Usage.OutputTokens,
-				CachedTokens:     obj.Usage.CacheRead,
+				PromptTokens:      obj.Usage.InputTokens,
+				CompletionTokens:  obj.Usage.OutputTokens,
+				TotalTokens:       obj.Usage.InputTokens + obj.Usage.OutputTokens,
+				CachedTokens:      obj.Usage.CacheRead,
 				CachedWriteTokens: obj.Usage.CacheCreation,
 			}
 			events = append(events, StreamEvent{Kind: "usage", Usage: u})
@@ -429,16 +446,17 @@ func (w *completionsStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			"id": "chatcmpl-opgo", "object": "chat.completion.chunk", "model": model,
 			"choices": []any{},
 			"usage": map[string]any{
-				"prompt_tokens": ev.Usage.PromptTokens,
-				"completion_tokens": ev.Usage.CompletionTokens,
-				"total_tokens": ev.Usage.TotalTokens,
+				"prompt_tokens":         ev.Usage.PromptTokens,
+				"completion_tokens":     ev.Usage.CompletionTokens,
+				"total_tokens":          ev.Usage.TotalTokens,
 				"prompt_tokens_details": map[string]any{"cached_tokens": ev.Usage.CachedTokens},
 			},
 		}
 		b, _ := json.Marshal(chunk)
 		return [][]byte{sseData(b)}
 	case "done":
-		return [][]byte{[]byte("data: [DONE]\n\n")}
+		// 终止事件由 Close() 统一补齐，避免重复 [DONE]
+		return nil
 	case "error":
 		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": ev.Error, "type": "opgo_translate_error"}})
 		return [][]byte{sseData(b)}
@@ -447,11 +465,221 @@ func (w *completionsStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 }
 
 // ---------- OpenAI Responses SSE 写入器 ----------
+// 严格对齐上游原生 Responses 流式事件结构（以 deepseek-v4-flash 原生为基准）：
+// 每个事件带递增 sequence_number；response.created/in_progress/completed 携带完整
+// response 对象（含 tools/temperature 等回显）；item/part 字段与原生逐一对齐。
+
+type responsesResponseObj struct {
+	ID                   string `json:"id"`
+	Object               string `json:"object"`
+	CreatedAt            int64  `json:"created_at"`
+	CompletedAt          any    `json:"completed_at"`
+	Status               string `json:"status"`
+	ParallelToolCalls    bool   `json:"parallel_tool_calls"`
+	Temperature          any    `json:"temperature"`
+	TopP                 any    `json:"top_p"`
+	MaxOutputTokens      any    `json:"max_output_tokens"`
+	PreviousResponseID   any    `json:"previous_response_id"`
+	Background           bool   `json:"background"`
+	Truncation           string `json:"truncation"`
+	TopLogprobs          int    `json:"top_logprobs"`
+	MaxToolCalls         any    `json:"max_tool_calls"`
+	PromptCacheRetention any    `json:"prompt_cache_retention"`
+	Model                string `json:"model"`
+	Error                any    `json:"error"`
+	IncompleteDetails    any    `json:"incomplete_details"`
+	Output               []any  `json:"output"`
+	Usage                any    `json:"usage"`
+	Instructions         any    `json:"instructions"`
+	ToolChoice           any    `json:"tool_choice"`
+	Tools                []any  `json:"tools"`
+	Reasoning            any    `json:"reasoning"`
+	Text                 any    `json:"text"`
+	Moderation           any    `json:"moderation"`
+}
+
+type responsesInputTokensDetails struct {
+	CachedTokens int64 `json:"cached_tokens"`
+}
+
+type responsesOutputTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
+type responsesUsageObj struct {
+	InputTokens         int64                        `json:"input_tokens"`
+	OutputTokens        int64                        `json:"output_tokens"`
+	TotalTokens         int64                        `json:"total_tokens"`
+	InputTokensDetails  responsesInputTokensDetails  `json:"input_tokens_details"`
+	OutputTokensDetails responsesOutputTokensDetails `json:"output_tokens_details"`
+}
+
+type responsesReasoningContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type responsesReasoningItem struct {
+	ID      string                          `json:"id"`
+	Type    string                          `json:"type"`
+	Status  string                          `json:"status"`
+	Content []responsesReasoningContentPart `json:"content"`
+	Summary []any                           `json:"summary"`
+}
+
+type responsesMessageContentPart struct {
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations"`
+	Logprobs    []any  `json:"logprobs"`
+}
+
+type responsesMessageItem struct {
+	ID      string                        `json:"id"`
+	Type    string                        `json:"type"`
+	Status  string                        `json:"status"`
+	Role    string                        `json:"role"`
+	Phase   string                        `json:"phase"`
+	Content []responsesMessageContentPart `json:"content"`
+}
+
+type responsesFunctionCallItem struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	Name      string `json:"name"`
+	CallID    string `json:"call_id"`
+	Arguments string `json:"arguments"`
+}
+
+type responsesToolEcho struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Strict      any             `json:"strict"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type responsesTextFormatObj struct {
+	Type string `json:"type"`
+}
+
+type responsesTextObj struct {
+	Verbosity any                    `json:"verbosity"`
+	Format    responsesTextFormatObj `json:"format"`
+}
+
+type responsesCreatedEvent struct {
+	Type           string               `json:"type"`
+	SequenceNumber int                  `json:"sequence_number"`
+	Response       responsesResponseObj `json:"response"`
+}
+
+type responsesCompletedEvent struct {
+	Type           string               `json:"type"`
+	SequenceNumber int                  `json:"sequence_number"`
+	Response       responsesResponseObj `json:"response"`
+}
+
+type responsesOutputItemAddedEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	Item           any    `json:"item"`
+}
+
+type responsesOutputItemDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	Item           any    `json:"item"`
+}
+
+type responsesContentPartAddedEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Part           any    `json:"part"`
+}
+
+type responsesContentPartDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Part           any    `json:"part"`
+}
+
+type responsesReasoningTextDeltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Delta          string `json:"delta"`
+}
+
+type responsesReasoningTextDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Text           string `json:"text"`
+}
+
+type responsesOutputTextDeltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Delta          string `json:"delta"`
+	Logprobs       []any  `json:"logprobs"`
+}
+
+type responsesOutputTextDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Text           string `json:"text"`
+	Logprobs       []any  `json:"logprobs"`
+}
+
+type responsesFunctionCallArgsDeltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ItemID         string `json:"item_id"`
+	Delta          string `json:"delta"`
+}
+
+type responsesFunctionCallArgsDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	ItemID         string `json:"item_id"`
+	Arguments      string `json:"arguments"`
+	Name           string `json:"name"`
+}
+
+type responsesPingEvent struct {
+	Type string `json:"type"`
+	Cost string `json:"cost"`
+}
 
 type responsesStreamWriter struct {
+	meta         *Request
+	model        string
+	respID       string
+	createdAt    int64
 	started      bool
 	nextIndex    int
-	// 当前活动块
 	blockType    string // "" | "reasoning" | "text" | "tool"
 	itemID       string
 	toolCallID   string
@@ -463,12 +691,13 @@ type responsesStreamWriter struct {
 	completed    bool
 	finishSeen   bool
 	pendingUsage *Usage
-	outputItems  []map[string]any // 对齐原生 response.completed.output
-	seq          int              // OpenAI Responses 流式协议：每个事件递增的 sequence_number
+	outputItems  []any
+	seq          int
+	pingSent     bool
 }
 
-func newResponsesStreamWriter() *responsesStreamWriter {
-	return &responsesStreamWriter{}
+func newResponsesStreamWriter(meta *Request) *responsesStreamWriter {
+	return &responsesStreamWriter{meta: meta, respID: uuid.NewString(), createdAt: time.Now().Unix(), outputItems: []any{}}
 }
 
 // nextSeq 返回当前 sequence_number 并递增（对齐原生流式协议）。
@@ -478,58 +707,93 @@ func (w *responsesStreamWriter) nextSeq() int {
 	return s
 }
 
-// begin 输出 response.created / response.in_progress（每个流只一次）。
-func (w *responsesStreamWriter) ensureStarted(model string, out *[][]byte) {
+// responseObj 构建与原生逐字段对齐的 response 对象。
+func (w *responsesStreamWriter) responseObj(status string, completedAt any, usage any) responsesResponseObj {
+	temp := any(1)
+	topp := any(1)
+	var maxOut any
+	toolChoice := any("auto")
+	parallel := true
+	instructions := any(nil)
+	reasoning := any(map[string]any{"effort": nil, "summary": nil})
+	tools := []any{}
+	if w.meta != nil {
+		if w.meta.Temperature != nil {
+			temp = *w.meta.Temperature
+		}
+		if w.meta.TopP != nil {
+			topp = *w.meta.TopP
+		}
+		if w.meta.MaxTokens != nil {
+			maxOut = *w.meta.MaxTokens
+		}
+		if w.meta.ToolChoice != nil {
+			toolChoice = w.meta.ToolChoice
+		}
+		if w.meta.ParallelToolCalls != nil {
+			parallel = *w.meta.ParallelToolCalls
+		}
+		if w.meta.Instructions != "" {
+			instructions = w.meta.Instructions
+		}
+		if len(w.meta.Tools) > 0 {
+			for _, t := range w.meta.Tools {
+				tools = append(tools, responsesToolEcho{
+					Type: "function", Name: t.Name, Description: t.Description, Strict: nil,
+					Parameters: json.RawMessage(t.Parameters),
+				})
+			}
+		}
+		if w.meta.ReasoningEffort != "" {
+			reasoning = map[string]any{"effort": w.meta.ReasoningEffort, "summary": nil}
+		}
+	}
+	return responsesResponseObj{
+		ID: w.respID, Object: "response", CreatedAt: w.createdAt, CompletedAt: completedAt,
+		Status: status, ParallelToolCalls: parallel, Temperature: temp, TopP: topp,
+		MaxOutputTokens: maxOut, PreviousResponseID: nil, Background: false,
+		Truncation: "disabled", TopLogprobs: 0, MaxToolCalls: nil, PromptCacheRetention: nil,
+		Model: w.model, Error: nil, IncompleteDetails: nil, Output: w.outputItems,
+		Usage: usage, Instructions: instructions, ToolChoice: toolChoice, Tools: tools,
+		Reasoning:  reasoning,
+		Text:       responsesTextObj{Verbosity: nil, Format: responsesTextFormatObj{Type: "text"}},
+		Moderation: nil,
+	}
+}
+
+// ensureStarted 输出 response.created / response.in_progress（每个流只一次，携带完整对象）。
+func (w *responsesStreamWriter) ensureStarted(out *[][]byte) {
 	if w.started {
 		return
 	}
 	w.started = true
-	created, _ := json.Marshal(map[string]any{
-		"type": "response.created", "sequence_number": w.nextSeq(),
-		"response": map[string]any{"id": "resp_1", "object": "response", "status": "in_progress", "model": model},
-	})
+	obj := w.responseObj("in_progress", nil, nil)
+	created, _ := json.Marshal(responsesCreatedEvent{Type: "response.created", SequenceNumber: w.nextSeq(), Response: obj})
 	*out = append(*out, sseData(created))
-	prog, _ := json.Marshal(map[string]any{
-		"type": "response.in_progress", "sequence_number": w.nextSeq(),
-		"response": map[string]any{"id": "resp_1", "object": "response", "status": "in_progress", "model": model},
-	})
+	prog, _ := json.Marshal(responsesCreatedEvent{Type: "response.in_progress", SequenceNumber: w.nextSeq(), Response: obj})
 	*out = append(*out, sseData(prog))
 }
 
-// beginReasoning 声明 reasoning item + content part。
 func (w *responsesStreamWriter) beginReasoning(out *[][]byte) {
 	w.blockType = "reasoning"
 	w.reasonAccum = ""
 	w.itemID = "rs_" + strconv.Itoa(w.nextIndex)
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
-	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": map[string]any{"id": w.itemID, "type": "reasoning", "summary": []any{}},
-	})
-	*out = append(*out, sseData(item))
-	part, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"part": map[string]any{"type": "summary_text", "text": "", "annotations": []any{}},
-	})
+	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "in_progress", Content: []responsesReasoningContentPart{}, Summary: []any{}}
+	ev, _ := json.Marshal(responsesOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
+	*out = append(*out, sseData(ev))
+	part, _ := json.Marshal(responsesContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "reasoning_text", Text: ""}})
 	*out = append(*out, sseData(part))
 }
 
 func (w *responsesStreamWriter) endReasoning(out *[][]byte) {
-	done, _ := json.Marshal(map[string]any{
-		"type": "response.reasoning_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": "", "sequence_number": w.nextSeq(),
-	})
+	done, _ := json.Marshal(responsesReasoningTextDoneEvent{Type: "response.reasoning_text.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Text: w.reasonAccum})
 	*out = append(*out, sseData(done))
-	cd, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"part": map[string]any{"type": "summary_text", "text": "", "annotations": []any{}},
-	})
+	cd, _ := json.Marshal(responsesContentPartDoneEvent{Type: "response.content_part.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "reasoning_text", Text: w.reasonAccum}})
 	*out = append(*out, sseData(cd))
-	item := map[string]any{"id": w.itemID, "type": "reasoning", "status": "completed", "content": []map[string]any{{"type": "reasoning_text", "text": w.reasonAccum}}, "summary": []any{}}
-	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": item,
-	})
+	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "completed", Content: []responsesReasoningContentPart{{Type: "reasoning_text", Text: w.reasonAccum}}, Summary: []any{}}
+	oid, _ := json.Marshal(responsesOutputItemDoneEvent{Type: "response.output_item.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(oid))
 	w.outputItems = append(w.outputItems, item)
 }
@@ -540,41 +804,27 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	w.textAccum = ""
-	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": map[string]any{"id": w.itemID, "type": "message", "role": "assistant", "content": []any{}},
-	})
-	*out = append(*out, sseData(item))
-	part, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.added", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
-	})
+	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "in_progress", Role: "assistant", Phase: "final_answer", Content: []responsesMessageContentPart{}}
+	ev, _ := json.Marshal(responsesOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
+	*out = append(*out, sseData(ev))
+	part, _ := json.Marshal(responsesContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesMessageContentPart{Type: "output_text", Text: "", Annotations: []any{}, Logprobs: []any{}}})
 	*out = append(*out, sseData(part))
 }
 
 func (w *responsesStreamWriter) endText(out *[][]byte) {
-	done, _ := json.Marshal(map[string]any{
-		"type": "response.output_text.done", "item_id": w.itemID, "output_index": w.outputIndex, "text": w.textAccum, "sequence_number": w.nextSeq(),
-	})
+	done, _ := json.Marshal(responsesOutputTextDoneEvent{Type: "response.output_text.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Text: w.textAccum, Logprobs: []any{}})
 	*out = append(*out, sseData(done))
-	cd, _ := json.Marshal(map[string]any{
-		"type": "response.content_part.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"part": map[string]any{"type": "output_text", "text": w.textAccum, "annotations": []any{}},
-	})
+	cd, _ := json.Marshal(responsesContentPartDoneEvent{Type: "response.content_part.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesMessageContentPart{Type: "output_text", Text: w.textAccum, Annotations: []any{}, Logprobs: []any{}}})
 	*out = append(*out, sseData(cd))
-	item := map[string]any{"id": w.itemID, "type": "message", "status": "completed", "role": "assistant", "phase": "final_answer", "content": []map[string]any{{"type": "output_text", "text": w.textAccum, "annotations": []any{}}}}
-	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": item,
-	})
+	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer", Content: []responsesMessageContentPart{{Type: "output_text", Text: w.textAccum, Annotations: []any{}, Logprobs: []any{}}}}
+	oid, _ := json.Marshal(responsesOutputItemDoneEvent{Type: "response.output_item.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(oid))
 	w.outputItems = append(w.outputItems, item)
 }
 
 func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.blockType = "tool"
-	// item id 必须是独立 UUID（对齐原生 responses：id 与 call_id 不同），
-	// call_id 保留上游工具调用 ID（call_xxx），Codex 依赖两者区分。
+	// item id 用独立 UUID，call_id 保留上游工具调用 ID（对齐原生 responses）。
 	callID := ev.ToolID
 	if callID == "" {
 		callID = "fc_" + ev.ToolName
@@ -585,11 +835,9 @@ func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	w.argsAccum = ""
-	item, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.added", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": map[string]any{"id": w.itemID, "type": "function_call", "status": "in_progress", "call_id": callID, "name": ev.ToolName, "arguments": ""},
-	})
-	*out = append(*out, sseData(item))
+	item := responsesFunctionCallItem{ID: w.itemID, Type: "function_call", Status: "in_progress", Name: ev.ToolName, CallID: callID, Arguments: ""}
+	evt, _ := json.Marshal(responsesOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
+	*out = append(*out, sseData(evt))
 }
 
 func (w *responsesStreamWriter) endTool(out *[][]byte) {
@@ -597,17 +845,11 @@ func (w *responsesStreamWriter) endTool(out *[][]byte) {
 	if argsStr == "" {
 		argsStr = "{}"
 	}
-	done, _ := json.Marshal(map[string]any{
-		"type": "response.function_call_arguments.done", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"call_id": w.toolCallID, "name": w.toolName, "arguments": argsStr,
-	})
+	done, _ := json.Marshal(responsesFunctionCallArgsDoneEvent{Type: "response.function_call_arguments.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ItemID: w.itemID, Arguments: argsStr, Name: w.toolName})
 	*out = append(*out, sseData(done))
 	// 注意：AI SDK 对 output_item.done 的 function_call 校验要求 arguments 为字符串
-	item := map[string]any{"id": w.itemID, "type": "function_call", "call_id": w.toolCallID, "name": w.toolName, "arguments": argsStr, "status": "completed"}
-	oid, _ := json.Marshal(map[string]any{
-		"type": "response.output_item.done", "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-		"item": item,
-	})
+	item := responsesFunctionCallItem{ID: w.itemID, Type: "function_call", Status: "completed", Name: w.toolName, CallID: w.toolCallID, Arguments: argsStr}
+	oid, _ := json.Marshal(responsesOutputItemDoneEvent{Type: "response.output_item.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(oid))
 	w.outputItems = append(w.outputItems, item)
 }
@@ -627,24 +869,44 @@ func (w *responsesStreamWriter) endBlock(out *[][]byte) {
 	w.outputIndex = 0
 }
 
-// emitCompleted 输出 response.completed（带 usage），只一次。
+// emitCompleted 输出 response.completed（带完整对象 + usage），只一次；随后输出原生结尾 ping。
 func (w *responsesStreamWriter) emitCompleted(model string, out *[][]byte) {
 	if w.completed {
 		return
 	}
 	w.completed = true
-	respMap := map[string]any{"id": "resp_1", "object": "response", "status": "completed", "model": model, "output": w.outputItems}
+	var usage any
 	if w.pendingUsage != nil {
-		respMap["usage"] = usageMap(w.pendingUsage)
+		usage = responsesUsageObj{
+			InputTokens:         w.pendingUsage.PromptTokens,
+			OutputTokens:        w.pendingUsage.CompletionTokens,
+			TotalTokens:         w.pendingUsage.TotalTokens,
+			InputTokensDetails:  responsesInputTokensDetails{CachedTokens: w.pendingUsage.CachedTokens},
+			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: w.pendingUsage.CachedWriteTokens},
+		}
 		w.pendingUsage = nil
 	}
-	evt, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": w.nextSeq(), "response": respMap})
+	obj := w.responseObj("completed", time.Now().Unix(), usage)
+	evt, _ := json.Marshal(responsesCompletedEvent{Type: "response.completed", SequenceNumber: w.nextSeq(), Response: obj})
+	*out = append(*out, sseData(evt))
+	w.emitPing(out)
+}
+
+func (w *responsesStreamWriter) emitPing(out *[][]byte) {
+	if w.pingSent {
+		return
+	}
+	w.pingSent = true
+	evt, _ := json.Marshal(responsesPingEvent{Type: "ping", Cost: "0"})
 	*out = append(*out, sseData(evt))
 }
 
 func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 	var out [][]byte
-	w.ensureStarted(model, &out)
+	if w.model == "" {
+		w.model = model
+	}
+	w.ensureStarted(&out)
 	switch ev.Kind {
 	case "start":
 		// 若已有活动块，先闭合再开新块
@@ -664,10 +926,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.beginReasoning(&out)
 		}
 		w.reasonAccum += ev.Reasoning
-		evt, _ := json.Marshal(map[string]any{
-			"type": "response.reasoning_text.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-			"delta": ev.Reasoning,
-		})
+		evt, _ := json.Marshal(responsesReasoningTextDeltaEvent{Type: "response.reasoning_text.delta", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Delta: ev.Reasoning})
 		out = append(out, sseData(evt))
 	case "text":
 		if w.blockType != "text" {
@@ -677,10 +936,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.beginText(&out)
 		}
 		w.textAccum += ev.Text
-		evt, _ := json.Marshal(map[string]any{
-			"type": "response.output_text.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-			"delta": ev.Text,
-		})
+		evt, _ := json.Marshal(responsesOutputTextDeltaEvent{Type: "response.output_text.delta", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Delta: ev.Text, Logprobs: []any{}})
 		out = append(out, sseData(evt))
 	case "tool_start":
 		if w.blockType != "" {
@@ -695,10 +951,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.beginTool(ev, &out)
 		}
 		w.argsAccum += ev.Args
-		evt, _ := json.Marshal(map[string]any{
-			"type": "response.function_call_arguments.delta", "item_id": w.itemID, "output_index": w.outputIndex, "sequence_number": w.nextSeq(),
-			"call_id": w.toolCallID, "delta": ev.Args,
-		})
+		evt, _ := json.Marshal(responsesFunctionCallArgsDeltaEvent{Type: "response.function_call_arguments.delta", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ItemID: w.itemID, Delta: ev.Args})
 		out = append(out, sseData(evt))
 	case "end_block":
 		if w.blockType != "" {
@@ -729,34 +982,49 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 	}
 	return out
 }
-func usageMap(u *Usage) map[string]any {
-	m := map[string]any{
-		"input_tokens":  u.PromptTokens,
-		"output_tokens": u.CompletionTokens,
-		"total_tokens":  u.TotalTokens,
-	}
-	if u.CachedTokens > 0 {
-		m["input_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
-	}
-	if u.CachedWriteTokens > 0 {
-		m["output_tokens_details"] = map[string]any{"reasoning_tokens": u.CachedWriteTokens}
-	}
-	return m
-}
 
 // ---------- Anthropic SSE 写入器 ----------
 
 type anthropicStreamWriter struct {
-	started   bool
-	blockIdx  int
-	blockType string
-	curIdx    int
-	finished  bool
-	deltaSent bool
+	started      bool
+	blockIdx     int
+	blockType    string
+	curIdx       int
+	finished     bool
+	deltaSent    bool
+	finishReason string // 上游 finish 事件的 stop_reason，等 usage 合并后一次性发出
+	pendingUsage *Usage
 }
 
 func newAnthropicStreamWriter() *anthropicStreamWriter {
 	return &anthropicStreamWriter{}
+}
+
+// emitDelta 发出唯一一条 message_delta（含 stop_reason 与用量）。
+func (w *anthropicStreamWriter) emitDelta(out *[][]byte, stopReason string, u *Usage) {
+	if w.deltaSent {
+		return
+	}
+	w.deltaSent = true
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	usage := map[string]any{"input_tokens": int64(0), "output_tokens": int64(0)}
+	if u != nil {
+		usage = map[string]any{"input_tokens": u.PromptTokens, "output_tokens": u.CompletionTokens}
+		if u.CachedTokens > 0 {
+			usage["cache_read_input_tokens"] = u.CachedTokens
+		}
+		if u.CachedWriteTokens > 0 {
+			usage["cache_creation_input_tokens"] = u.CachedWriteTokens
+		}
+	}
+	delta, _ := json.Marshal(map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
+		"usage": usage,
+	})
+	*out = append(*out, sseData(delta))
 }
 
 func (w *anthropicStreamWriter) ensureStarted(model string, out *[][]byte) {
@@ -861,52 +1129,33 @@ func (w *anthropicStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			return out
 		}
 		w.finished = true
+		w.finishReason = mapOpenAIStopToAnthropic(ev.Finish)
 		w.endBlock(&out)
-		if !w.deltaSent {
-			delta, _ := json.Marshal(map[string]any{
-				"type": "message_delta",
-				"delta": map[string]any{"stop_reason": mapOpenAIStopToAnthropic(ev.Finish), "stop_sequence": nil},
-				"usage": map[string]any{"output_tokens": 0},
-			})
-			out = append(out, sseData(delta))
-			w.deltaSent = true
+		// 延迟 message_delta：等 usage 到达后合并为一条（避免重复 message_delta）
+		if w.pendingUsage != nil {
+			w.emitDelta(&out, w.finishReason, w.pendingUsage)
 		}
 	case "usage":
-		u := map[string]any{
-			"input_tokens":  ev.Usage.PromptTokens,
-			"output_tokens": ev.Usage.CompletionTokens,
+		w.pendingUsage = &Usage{
+			PromptTokens:      ev.Usage.PromptTokens,
+			CompletionTokens:  ev.Usage.CompletionTokens,
+			TotalTokens:       ev.Usage.TotalTokens,
+			CachedTokens:      ev.Usage.CachedTokens,
+			CachedWriteTokens: ev.Usage.CachedWriteTokens,
 		}
-		if ev.Usage.CachedTokens > 0 {
-			u["cache_read_input_tokens"] = ev.Usage.CachedTokens
-		}
-		if ev.Usage.CachedWriteTokens > 0 {
-			u["cache_creation_input_tokens"] = ev.Usage.CachedWriteTokens
-		}
-		if !w.finished {
-			w.finished = true
+		if w.finished && !w.deltaSent {
 			w.endBlock(&out)
+			w.emitDelta(&out, w.finishReason, w.pendingUsage)
 		}
-		delta, _ := json.Marshal(map[string]any{
-			"type": "message_delta",
-			"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": u,
-		})
-		out = append(out, sseData(delta))
-		w.deltaSent = true
 	case "done":
 		if !w.finished {
 			w.finished = true
 			w.endBlock(&out)
-			delta, _ := json.Marshal(map[string]any{
-				"type": "message_delta",
-				"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-				"usage": map[string]any{"output_tokens": 0},
-			})
-			out = append(out, sseData(delta))
-			w.deltaSent = true
 		}
-		stop, _ := json.Marshal(map[string]any{"type": "message_stop"})
-		out = append(out, sseData(stop))
+		if !w.deltaSent {
+			w.emitDelta(&out, w.finishReason, w.pendingUsage)
+		}
+		// message_stop 由 Close() 统一补齐，避免重复
 	case "error":
 		evt, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": ev.Error}})
 		out = append(out, sseData(evt))

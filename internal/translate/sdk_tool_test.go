@@ -45,14 +45,50 @@ func TestStreamToolCallSDKCompatibility(t *testing.T) {
 		}
 	}
 
-	// 断言：delta/done 带 call_id
+	// 对齐原生 Responses：call_id 只出现在 output_item.added/done 的 item 上，
+	// delta/done 事件不带 call_id（与 deepseek-v4-flash/gpt-5.6-luna 原生一致）。
+	itemCallIDs := map[string]string{}
 	for _, ev := range evs {
-		switch ev["type"] {
-		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
-			if ev["call_id"] == nil || ev["call_id"] != "call_1" {
-				t.Errorf("%v 缺 call_id: %v", ev["type"], ev)
+		if ev["type"] == "response.output_item.added" {
+			if item, ok := ev["item"].(map[string]any); ok && item["type"] == "function_call" {
+				cid, _ := item["call_id"].(string)
+				itemCallIDs["added"] = cid
+				if item["status"] != "in_progress" {
+					t.Errorf("output_item.added function_call 缺 status=in_progress: %v", item)
+				}
+				if _, ok := item["name"].(string); !ok {
+					t.Errorf("output_item.added function_call 缺 name: %v", item)
+				}
+				if _, ok := item["arguments"].(string); !ok {
+					t.Errorf("output_item.added function_call arguments 应为字符串: %v", item)
+				}
 			}
 		}
+		if ev["type"] == "response.output_item.done" {
+			if item, ok := ev["item"].(map[string]any); ok && item["type"] == "function_call" {
+				cid, _ := item["call_id"].(string)
+				itemCallIDs["done"] = cid
+			}
+		}
+		if ev["type"] == "response.function_call_arguments.delta" {
+			if ev["call_id"] != nil {
+				t.Errorf("delta 不应带 call_id（原生格式无此字段）: %v", ev)
+			}
+			if _, ok := ev["item_id"].(string); !ok {
+				t.Errorf("delta 缺 item_id: %v", ev)
+			}
+		}
+		if ev["type"] == "response.function_call_arguments.done" {
+			if ev["call_id"] != nil {
+				t.Errorf("done 不应带 call_id（原生格式无此字段）: %v", ev)
+			}
+		}
+	}
+	if itemCallIDs["added"] == "" || itemCallIDs["added"] != "call_1" {
+		t.Errorf("output_item.added function_call call_id 应为 call_1: %v", itemCallIDs)
+	}
+	if itemCallIDs["done"] != "call_1" {
+		t.Errorf("output_item.done function_call call_id 应为 call_1: %v", itemCallIDs)
 	}
 	// done 带 name 与字符串 arguments
 	var doneEv map[string]any

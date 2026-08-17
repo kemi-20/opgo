@@ -1,5 +1,7 @@
 package translate
 
+import "encoding/json"
+
 // ConvertRequest 把客户端格式的请求体转换为目标格式的请求体。
 func ParseRequest(from Format, raw []byte) (*Request, error) {
 	switch from {
@@ -22,7 +24,7 @@ func ConvertRequest(from, to Format, raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-if err != nil {
+	if err != nil {
 		return nil, err
 	}
 	// 计费必需：转换模式下强制请求 usage（上游响应需带 usage 才能按 token 计费）。
@@ -111,16 +113,21 @@ type StreamConverter struct {
 		Write(StreamEvent, string) [][]byte
 	}
 	model string
+	meta  *Request // 可选：原始客户端请求（用于对齐原生 responses 回显字段）
 }
 
-// NewStreamConverter 创建流式转换器。
-func NewStreamConverter(from, to Format, model string) *StreamConverter {
+// NewStreamConverter 创建流式转换器。meta 可选：转换到 Responses 时用于回显
+// tools/temperature/max_output_tokens 等字段，与原生响应保持一致。
+func NewStreamConverter(from, to Format, model string, meta ...*Request) *StreamConverter {
 	sc := &StreamConverter{from: from, to: to, reader: newStreamReader(), model: model}
+	if len(meta) > 0 {
+		sc.meta = meta[0]
+	}
 	switch to {
 	case FormatOpenAICompletions:
 		sc.writer = newCompletionsStreamWriter()
 	case FormatOpenAIResponses:
-		sc.writer = newResponsesStreamWriter()
+		sc.writer = newResponsesStreamWriter(sc.meta)
 	case FormatAnthropic:
 		sc.writer = newAnthropicStreamWriter()
 	}
@@ -156,13 +163,16 @@ func (sc *StreamConverter) Close() [][]byte {
 		return [][]byte{[]byte("data: [DONE]\n\n")}
 	}
 	if sc.to == FormatAnthropic {
-		return sc.writer.Write(StreamEvent{Kind: "done"}, sc.model)
+		out := sc.writer.Write(StreamEvent{Kind: "done"}, sc.model)
+		stop, _ := json.Marshal(map[string]any{"type": "message_stop"})
+		return append(out, sseData(stop))
 	}
 	if sc.to == FormatOpenAIResponses {
 		return sc.writer.Write(StreamEvent{Kind: "done"}, sc.model)
 	}
 	return nil
 }
+
 // FormatPath 返回格式对应的上游路径后缀（去掉 /v1 后）。
 func FormatPath(f Format) string {
 	switch f {
