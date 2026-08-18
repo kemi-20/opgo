@@ -29,10 +29,12 @@ mkdir -p "$OPGO_DIR"
 chown opgo:opgo "$OPGO_DIR"
 
 echo "==> 检查已有配置"
-if [ -f "$OPGO_DIR/config.json" ]; then
-  echo "    检测到 $OPGO_DIR/config.json，升级将保留原有配置（不会覆盖），无需重新配置。"
+if [ -f "$OPGO_DIR/config.jsonc" ]; then
+  echo "    检测到 $OPGO_DIR/config.jsonc，升级将保留原有配置（不会覆盖），无需重新配置。"
+elif [ -f "$OPGO_DIR/config.json" ]; then
+  echo "    检测到旧版 $OPGO_DIR/config.json，程序会自动兼容读取（不覆盖），无需重新配置。"
 else
-  echo "    未检测到配置，首次启动时程序会自动生成示例配置 $OPGO_DIR/config.json。"
+  echo "    未检测到配置，首次启动时程序会自动生成示例配置 $OPGO_DIR/config.jsonc。"
 fi
 
 echo "==> 获取最新 release 信息"
@@ -87,7 +89,7 @@ systemctl daemon-reload
 systemctl enable --now "$SERVICE"
 
 echo ""
-echo "安装完成。首次启动会自动生成示例配置 /opt/opgo/config.json，"
+echo "安装完成。首次启动会自动生成示例配置 /opt/opgo/config.jsonc，"
 echo "请编辑该文件（upstream_base / master_key / admin_password / users）后执行："
 echo "  sudo systemctl restart opgo"
 echo "查看日志："

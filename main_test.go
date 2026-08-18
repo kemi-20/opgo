@@ -8,12 +8,12 @@ import (
 )
 
 func TestAssetsMatchSource(t *testing.T) {
-	ex, err := os.ReadFile("config.example.json")
+	ex, err := os.ReadFile("config.example.jsonc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(exampleConfig) != string(ex) {
-		t.Error("exampleConfig 与 config.example.json 不一致，请重新运行 scripts/gen_assets.ps1")
+		t.Error("exampleConfig 与 config.example.jsonc 不一致，请重新运行 scripts/gen_assets.ps1")
 	}
 	html, err := os.ReadFile("web/index.html")
 	if err != nil {

@@ -233,35 +233,35 @@ func TestApplyPeak(t *testing.T) {
 	falseVal := false
 	windows := [][]string{{"01:00", "04:00"}, {"06:00", "10:00"}}
 	peak := &config.ModelPeak{Enabled: &trueVal, Multiplier: 2, Windows: windows}
-	price := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: peak}
+	price := config.ModelPricing{InputPerMillion: 0.44, OutputPerMillion: 1.32, CachedReadPerMillion: 0.014, Peak: peak}
 	// 峰时：翻倍
 	p := ApplyPeak(price, "deepseek-v4-flash", parseTestTime("02:00"))
-	if p.InputPerMillion != 1.76 || p.OutputPerMillion != 5.28 || p.CachedReadPerMillion != 0.056 {
+	if p.InputPerMillion != 0.88 || p.OutputPerMillion != 2.64 || p.CachedReadPerMillion != 0.028 {
 		t.Errorf("peak price not doubled: %+v", p)
 	}
 	// 谷时：不变
 	p = ApplyPeak(price, "deepseek-v4-flash", parseTestTime("12:00"))
-	if p.InputPerMillion != 0.88 || p.OutputPerMillion != 2.64 || p.CachedReadPerMillion != 0.028 {
+	if p.InputPerMillion != 0.44 || p.OutputPerMillion != 1.32 || p.CachedReadPerMillion != 0.014 {
 		t.Errorf("off-peak price changed: %+v", p)
 	}
 	// 未配置 peak 的模型峰时不变
-	noPeak := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028}
+	noPeak := config.ModelPricing{InputPerMillion: 0.44, OutputPerMillion: 1.32, CachedReadPerMillion: 0.014}
 	p = ApplyPeak(noPeak, "mimo-v2.5", parseTestTime("02:00"))
-	if p.InputPerMillion != 0.88 {
+	if p.InputPerMillion != 0.44 {
 		t.Errorf("model without peak config changed in peak: %+v", p)
 	}
 	// enabled=false 时不变
 	disabled := &config.ModelPeak{Enabled: &falseVal, Multiplier: 2, Windows: windows}
-	dPrice := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: disabled}
+	dPrice := config.ModelPricing{InputPerMillion: 0.44, OutputPerMillion: 1.32, CachedReadPerMillion: 0.014, Peak: disabled}
 	p = ApplyPeak(dPrice, "deepseek-v4-flash", parseTestTime("02:00"))
-	if p.InputPerMillion != 0.88 {
+	if p.InputPerMillion != 0.44 {
 		t.Errorf("peak disabled but price changed: %+v", p)
 	}
 	// 未填 multiplier 默认 2 倍
 	noMult := &config.ModelPeak{Enabled: &trueVal, Windows: windows}
-	mPrice := config.ModelPricing{InputPerMillion: 0.88, OutputPerMillion: 2.64, CachedReadPerMillion: 0.028, Peak: noMult}
+	mPrice := config.ModelPricing{InputPerMillion: 0.44, OutputPerMillion: 1.32, CachedReadPerMillion: 0.014, Peak: noMult}
 	p = ApplyPeak(mPrice, "deepseek-v4-flash", parseTestTime("02:00"))
-	if p.InputPerMillion != 1.76 {
+	if p.InputPerMillion != 0.88 {
 		t.Errorf("default multiplier not applied: %+v", p)
 	}
 }

@@ -194,9 +194,26 @@ type Config struct {
 
 func DefaultConfigPath() string {
 	if runtime.GOOS == "windows" {
-		return "config.json"
+		return "config.jsonc"
 	}
-	return "/opt/opgo/config.json"
+	return "/opt/opgo/config.jsonc"
+}
+
+// ResolveConfigPath 返回实际应读取的配置路径：
+// 新版本默认扩展名为 .jsonc（VSCode 按 JSONC 校验、允许注释）；若 .jsonc 不存在
+// 但同目录存在旧的 .json 配置，则回退到旧文件（兼容升级，不自动改名、不覆盖用户文件）。
+func ResolveConfigPath(path string) string {
+	if !strings.HasSuffix(strings.ToLower(path), ".jsonc") {
+		return path
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacy := strings.TrimSuffix(path, ".jsonc") + ".json"
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return path
 }
 
 func DefaultDBPath() string {
@@ -238,7 +255,7 @@ func LoadStrict(path string, log *slog.Logger) (*Config, error) {
 	return Parse(data)
 }
 
-// stripJSONComments 移除 JSONC 风格注释（// 与 /* */），支持 config.example.json
+// stripJSONComments 移除 JSONC 风格注释（// 与 /* */），支持 config.example.jsonc
 // 中 transformation 行内注释。逐字符扫描，字符串内（含转义）的 // 不会被误删，
 // 因此 https://... 等 URL 安全。
 func stripJSONComments(data []byte) []byte {

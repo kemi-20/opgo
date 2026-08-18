@@ -26,6 +26,9 @@ func main() {
 	auditMode := flag.Bool("audit", false, "运行密钥防泄露自检后退出（不修改任何配置与数据）")
 	flag.Parse()
 
+	// 兼容旧 .json 配置：默认 .jsonc 不存在时回退到同目录 .json（不自动改名/覆盖）。
+	*cfgPath = config.ResolveConfigPath(*cfgPath)
+
 	if *auditMode {
 		cfg, err := config.LoadStrict(*cfgPath, logger)
 		if err != nil {

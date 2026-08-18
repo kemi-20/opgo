@@ -18,8 +18,8 @@ const exampleJSON = `{
 	"rate_limit_per_minute": 60,
 	"limits_per_user": {"5h": 2.4, "1w": 6.0, "1m": 12.0},
 	"pricing": {
-		"deepseek-v4-flash": {"input_per_million": 0.88, "output_per_million": 2.64, "cached_read_per_million": 0.028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000, "tag": "高峰期2x消耗", "peak": {"enabled": true, "multiplier": 2, "windows": [["01:00", "04:00"], ["06:00", "10:00"]]}},
-		"deepseek-v4-pro": {"input_per_million": 2.64, "output_per_million": 7.92, "cached_read_per_million": 0.088, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000, "tag": "高峰期2x消耗", "peak": {"enabled": true, "multiplier": 2, "windows": [["01:00", "04:00"], ["06:00", "10:00"]]}},
+		"deepseek-v4-flash": {"input_per_million": 0.44, "output_per_million": 1.32, "cached_read_per_million": 0.014, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000, "tag": "高峰期2x消耗", "peak": {"enabled": true, "multiplier": 2, "windows": [["01:00", "04:00"], ["06:00", "10:00"]]}},
+		"deepseek-v4-pro": {"input_per_million": 1.32, "output_per_million": 3.96, "cached_read_per_million": 0.044, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000, "tag": "高峰期2x消耗", "peak": {"enabled": true, "multiplier": 2, "windows": [["01:00", "04:00"], ["06:00", "10:00"]]}},
 		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
 		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000},
 		"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"}
@@ -53,8 +53,8 @@ func TestParseExample(t *testing.T) {
 	}
 	if pp, ok := c.Price("deepseek-v4-pro"); !ok {
 		t.Error("deepseek-v4-pro 应有价格")
-	} else if pp.InputPerMillion != 2.64 || pp.OutputPerMillion != 7.92 || pp.CachedReadPerMillion != 0.088 || pp.CachedWritePerMillion != 0 {
-		t.Errorf("deepseek-v4-pro 价格 = %+v，应为官网谷时价（0.66/1.98/0.022）的 4 倍", pp)
+	} else if pp.InputPerMillion != 1.32 || pp.OutputPerMillion != 3.96 || pp.CachedReadPerMillion != 0.044 || pp.CachedWritePerMillion != 0 {
+		t.Errorf("deepseek-v4-pro 价格 = %+v，应为官网谷时价（0.66/1.98/0.022）的 2 倍", pp)
 	} else if pp.Tag != "高峰期2x消耗" {
 		t.Errorf("deepseek-v4-pro tag = %q，应为 高峰期2x消耗", pp.Tag)
 	}
@@ -75,8 +75,8 @@ func TestParseExample(t *testing.T) {
 	if !dp.HasContextLength() || dp.ContextLength != 1000000 {
 		t.Errorf("deepseek-v4-flash context_length = %d，应默认 1000000", dp.ContextLength)
 	}
-	if dp.InputPerMillion != 0.88 || dp.OutputPerMillion != 2.64 || dp.CachedReadPerMillion != 0.028 {
-		t.Errorf("deepseek-v4-flash 价格 = %+v，应为官网谷时价（0.22/0.66/0.007）的 4 倍", dp)
+	if dp.InputPerMillion != 0.44 || dp.OutputPerMillion != 1.32 || dp.CachedReadPerMillion != 0.014 {
+		t.Errorf("deepseek-v4-flash 价格 = %+v，应为官网谷时价（0.22/0.66/0.007）的 2 倍", dp)
 	}
 	if dp.Tag != "高峰期2x消耗" {
 		t.Errorf("deepseek-v4-flash tag = %q", dp.Tag)
@@ -220,21 +220,21 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 		t.Fatalf("RawPricing 顺序 = %+v，应保持 config 书写顺序", list)
 	}
 	p := list[0].Price
-	if p.InputPerMillion != "0.88" {
-		t.Errorf("input raw = %q, want 0.88", p.InputPerMillion)
+	if p.InputPerMillion != "0.44" {
+		t.Errorf("input raw = %q, want 0.44", p.InputPerMillion)
 	}
-	if p.OutputPerMillion != "2.64" {
-		t.Errorf("output raw = %q, want 2.64", p.OutputPerMillion)
+	if p.OutputPerMillion != "1.32" {
+		t.Errorf("output raw = %q, want 1.32", p.OutputPerMillion)
 	}
-	if p.CachedReadPerMillion != "0.028" {
-		t.Errorf("cached read raw = %q, want 0.028", p.CachedReadPerMillion)
+	if p.CachedReadPerMillion != "0.014" {
+		t.Errorf("cached read raw = %q, want 0.014", p.CachedReadPerMillion)
 	}
 	if p.CachedWritePerMillion != "0" {
 		t.Errorf("cached write raw = %q, want 0", p.CachedWritePerMillion)
 	}
 	// 修改返回的切片不应影响原配置（副本语义）
 	list[0].Price.InputPerMillion = "999"
-	if got := c.RawPricing()[0].Price.InputPerMillion; got != "0.88" {
+	if got := c.RawPricing()[0].Price.InputPerMillion; got != "0.44" {
 		t.Errorf("RawPricing 应返回副本，got %q", got)
 	}
 }
@@ -353,5 +353,45 @@ func TestStripJSONCommentsStringSafety(t *testing.T) {
 	out := string(stripJSONComments(in))
 	if out != `{"a":"http://x/y","b":"line // not comment","c":"esc \" // still str"}` {
 		t.Errorf("字符串内注释被误删: %s", out)
+	}
+}
+
+// TestResolveConfigPath 验证 .jsonc/.json 兼容选择：
+// 只有 jsonc 读 jsonc；只有 json 读 json；两者都在优先 jsonc。
+func TestResolveConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	jc := filepath.Join(dir, "config.jsonc")
+	j := filepath.Join(dir, "config.json")
+
+	// 只有 jsonc
+	if err := os.WriteFile(jc, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigPath(jc); got != jc {
+		t.Errorf("仅 jsonc 时应返回 jsonc, got %s", got)
+	}
+
+	// 只有 json
+	if err := os.Remove(jc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(j, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigPath(jc); got != j {
+		t.Errorf("仅 json 时应回退到 json, got %s", got)
+	}
+
+	// 两者都在 → 优先 jsonc
+	if err := os.WriteFile(jc, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigPath(jc); got != jc {
+		t.Errorf("同时存在时应优先 jsonc, got %s", got)
+	}
+
+	// 显式 -config config.json 不绕
+	if got := ResolveConfigPath(j); got != j {
+		t.Errorf("显式 json 路径不应改写, got %s", got)
 	}
 }

@@ -26,7 +26,7 @@ func TestManagerReloadValid(t *testing.T) {
 	// 修改文件：用户 key 与价格变更
 	changed := strings.Replace(exampleJSON, "sk-u1", "sk-new-hot", 1)
 	changed = strings.Replace(changed, "uuid-1", "uuid-hot", 1)
-	changed = strings.Replace(changed, "\"input_per_million\": 0.88", "\"input_per_million\": 0.99", 1)
+	changed = strings.Replace(changed, "\"input_per_million\": 0.44", "\"input_per_million\": 0.99", 1)
 	if err := os.WriteFile(path, []byte(changed), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -21,9 +21,9 @@
   },
   "pricing": {
     "deepseek-v4-flash": {
-      "input_per_million": 0.88, // 谷时价 = 官网 Off-Peak $0.22 的 4 倍；峰时自动加倍（$1.76）
-      "output_per_million": 2.64, // 谷时价 = 官网 Off-Peak $0.66 的 4 倍；峰时自动加倍（$5.28）
-      "cached_read_per_million": 0.028, // 谷时价 = 官网 Off-Peak $0.007 的 4 倍；峰时自动加倍（$0.056）
+      "input_per_million": 0.44, // 谷时价 = 官网 Off-Peak $0.22 的 2 倍；峰时自动加倍（$0.88）
+      "output_per_million": 1.32, // 谷时价 = 官网 Off-Peak $0.66 的 2 倍；峰时自动加倍（$2.64）
+      "cached_read_per_million": 0.014, // 谷时价 = 官网 Off-Peak $0.007 的 2 倍；峰时自动加倍（$0.028）
       "cached_write_per_million": 0,
       "context_length": 1000000,
       "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）
@@ -37,9 +37,9 @@
       }
     },
     "deepseek-v4-pro": {
-      "input_per_million": 2.64, // 谷时价 = 官网 Off-Peak $0.66 的 4 倍；峰时自动加倍（$5.28）
-      "output_per_million": 7.92, // 谷时价 = 官网 Off-Peak $1.98 的 4 倍；峰时自动加倍（$15.84）
-      "cached_read_per_million": 0.088, // 谷时价 = 官网 Off-Peak $0.022 的 4 倍；峰时自动加倍（$0.176）
+      "input_per_million": 1.32, // 谷时价 = 官网 Off-Peak $0.66 的 2 倍；峰时自动加倍（$2.64）
+      "output_per_million": 3.96, // 谷时价 = 官网 Off-Peak $1.98 的 2 倍；峰时自动加倍（$7.92）
+      "cached_read_per_million": 0.044, // 谷时价 = 官网 Off-Peak $0.022 的 2 倍；峰时自动加倍（$0.088）
       "cached_write_per_million": 0,
       "context_length": 1000000,
       "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）

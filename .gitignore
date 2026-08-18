@@ -1,4 +1,5 @@
 config.json
+config.jsonc
 usage.db
 usage.db-wal
 usage.db-shm
@@ -7,3 +8,4 @@ dist/
 *.exe~
 .tmp/
 scripts/
+.vscode/

@@ -4,7 +4,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- 按 token 精确计费：模型单价写在 config.json（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3 定价）
+- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
 - 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
@@ -15,13 +15,17 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 - 密钥防泄露：任何接口/前端都不返回任何 key；内置 `opgo -audit` 自检
 - 单文件静态二进制，Windows / Linux 均可运行
 
+## 配置文件（.jsonc）
+
+- 配置文件名称为 `config.jsonc`（JSONC = JSON with Comments）。程序会自动剥离注释再解析，因此**行内 `//` 注释可以放心写**；VSCode 打开时把语言模式选为 `JSONC` 即可消除红色波浪线（标准 JSON 校验器不允许注释）。
+- 兼容旧版 `config.json`：若目录下只有 `.json` 则直接读取；两者同时存在时**优先读 `.jsonc`**（不会自动改名或覆盖旧文件）。
 ## 一键安装（Ubuntu / Debian amd64）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kemi-20/opgo/main/install.sh | sudo bash
 ```
 
-首次启动会自动生成 /opt/opgo/config.json（示例配置），编辑后重启：
+首次启动会自动生成 /opt/opgo/config.jsonc（示例配置），编辑后重启：
 
 ```bash
 sudo systemctl restart opgo
@@ -36,7 +40,7 @@ go build -o opgo.exe .
 .\opgo.exe
 ```
 
-首次运行会在当前目录自动生成 config.json，修改后重启。
+首次运行会在当前目录自动生成 config.jsonc，修改后重启。
 
 ## 访问方式（客户端配置）
 
@@ -71,9 +75,9 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 
 ```json
 "deepseek-v4-flash": {
-  "input_per_million": 0.88, // 谷时价
-  "output_per_million": 2.64,
-  "cached_read_per_million": 0.028,
+  "input_per_million": 0.44, // 谷时价
+  "output_per_million": 1.32,
+  "cached_read_per_million": 0.014,
   "cached_write_per_million": 0,
   "peak": {
     "enabled": true, // 是否启用（配置了 peak 默认启用）
@@ -86,7 +90,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 - 峰时窗口：01:00-04:00 与 06:00-10:00（UTC），其他时间为谷时；可自行修改 windows。
 - 未配置 `peak` 的模型始终按 config 价格计费（无峰谷）。
 - 可 `"enabled": false` 单独关闭某模型的峰谷。
-- 当前示例仅 DeepSeek 双模型配置了 peak：deepseek-v4-flash 谷时 $0.88/$2.64/$0.028，峰时自动按 $1.76/$5.28/$0.056 计费（官网 Off-Peak 价的 4 倍，峰时再翻倍）。
+- 当前示例仅 DeepSeek 双模型配置了 peak：deepseek-v4-flash 谷时 $0.44/$1.32/$0.014，峰时自动按 $0.88/$2.64/$0.028 计费（官网 Off-Peak 价的 2 倍，峰时再翻倍）。
 
 ## 模型模态（modality）
 
@@ -95,9 +99,9 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 ```json
 "pricing": {
   "deepseek-v4-flash": {
-    "input_per_million": 0.88,
-    "output_per_million": 2.64,
-    "cached_read_per_million": 0.028,
+    "input_per_million": 0.44,
+    "output_per_million": 1.32,
+    "cached_read_per_million": 0.014,
     "cached_write_per_million": 0,
     "context_length": 1000000,
     "max_output_tokens": 384000,
@@ -214,7 +218,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 ## 密钥自检
 
 ```bash
-opgo -audit -config /opt/opgo/config.json
+opgo -audit -config /opt/opgo/config.jsonc
 ```
 
 全部 PASS 退出码为 0；任何响应中出现 key 都会 FAIL。
