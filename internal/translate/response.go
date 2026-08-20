@@ -361,11 +361,19 @@ type responsesNonStreamResponse struct {
 	Text                 any    `json:"text"`
 	Moderation           any    `json:"moderation"`
 	Cost                 string `json:"cost"`
+	EndTurn              *bool  `json:"end_turn,omitempty"`
 }
 
 func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, error) {
 	responseID := newResponsesID("resp")
 	output := make([]any, 0, 4)
+	forceFollowUp := false
+	for _, c := range resp.Choices {
+		if len(c.ToolCalls) == 0 && c.FinishReason == "stop" && shouldContinueAfterPrelude(c.Text, meta) {
+			forceFollowUp = true
+			break
+		}
+	}
 	// 转换所得思考按 Responses reasoning summary 返回，使 Codex 等客户端使用
 	// 稳定的摘要增量渲染路径；原生 Responses 请求仍由代理直接透传。
 	if len(resp.Choices) > 0 && resp.Choices[0].Reasoning != "" {
@@ -377,8 +385,12 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 	}
 	for _, c := range resp.Choices {
 		if c.Text != "" || len(c.ToolCalls) == 0 {
+			phase := "final_answer"
+			if forceFollowUp && len(c.ToolCalls) == 0 {
+				phase = "commentary"
+			}
 			output = append(output, responsesMessageItem{
-				ID: newResponsesID("msg"), Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer",
+				ID: newResponsesID("msg"), Type: "message", Status: "completed", Role: "assistant", Phase: phase,
 				Content: []responsesMessageContentPart{{Type: "output_text", Text: c.Text, Annotations: []any{}, Logprobs: []any{}}},
 			})
 		}
@@ -465,6 +477,10 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 		ToolChoice: toolChoice, Tools: tools, Reasoning: reasoning,
 		Text:       responsesTextObj{Verbosity: nil, Format: responsesTextFormatObj{Type: "text"}},
 		Moderation: nil, Cost: "0",
+	}
+	if forceFollowUp {
+		v := false
+		out.EndTurn = &v
 	}
 	return json.Marshal(out)
 }

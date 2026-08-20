@@ -121,9 +121,10 @@ func TestResponsesNativeAlignment(t *testing.T) {
 				if item["status"] == "in_progress" {
 					msgStatusOK = true
 				}
-				if item["phase"] == "final_answer" {
-					msgPhaseOK = true
-				}
+			}
+		case "response.output_item.done":
+			if item, ok := ev["item"].(map[string]any); ok && item["type"] == "message" && item["phase"] == "final_answer" {
+				msgPhaseOK = true
 			}
 		case "ping":
 			hasPing = true

@@ -549,6 +549,7 @@ type responsesResponseObj struct {
 	Reasoning            any    `json:"reasoning"`
 	Text                 any    `json:"text"`
 	Moderation           any    `json:"moderation"`
+	EndTurn              *bool  `json:"end_turn,omitempty"`
 }
 
 type responsesInputTokensDetails struct {
@@ -593,7 +594,7 @@ type responsesMessageItem struct {
 	Type    string                        `json:"type"`
 	Status  string                        `json:"status"`
 	Role    string                        `json:"role"`
-	Phase   string                        `json:"phase"`
+	Phase   string                        `json:"phase,omitempty"`
 	Content []responsesMessageContentPart `json:"content"`
 }
 
@@ -737,26 +738,28 @@ type responsesPingEvent struct {
 }
 
 type responsesStreamWriter struct {
-	meta         *Request
-	model        string
-	respID       string
-	createdAt    int64
-	started      bool
-	nextIndex    int
-	blockType    string // "" | "reasoning" | "text" | "tool"
-	itemID       string
-	toolCallID   string
-	outputIndex  int
-	toolName     string
-	textAccum    string
-	reasonAccum  string
-	argsAccum    string
-	completed    bool
-	finishSeen   bool
-	pendingUsage *Usage
-	outputItems  []any
-	seq          int
-	pingSent     bool
+	meta               *Request
+	model              string
+	respID             string
+	createdAt          int64
+	started            bool
+	nextIndex          int
+	blockType          string // "" | "reasoning" | "text" | "tool"
+	itemID             string
+	toolCallID         string
+	outputIndex        int
+	toolName           string
+	textAccum          string
+	reasonAccum        string
+	argsAccum          string
+	completed          bool
+	finishSeen         bool
+	pendingUsage       *Usage
+	outputItems        []any
+	seq                int
+	pingSent           bool
+	forceFollowUp      bool
+	textFollowedByTool bool
 }
 
 func newResponsesStreamWriter(meta *Request) *responsesStreamWriter {
@@ -820,7 +823,13 @@ func (w *responsesStreamWriter) responseObj(status string, completedAt any, usag
 		Usage: usage, Instructions: instructions, ToolChoice: toolChoice, Tools: tools,
 		Reasoning:  reasoning,
 		Text:       responsesTextObj{Verbosity: nil, Format: responsesTextFormatObj{Type: "text"}},
-		Moderation: nil,
+		Moderation: nil, EndTurn: func() *bool {
+			if !w.forceFollowUp {
+				return nil
+			}
+			v := false
+			return &v
+		}(),
 	}
 }
 
@@ -867,7 +876,10 @@ func (w *responsesStreamWriter) beginText(out *[][]byte) {
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	w.textAccum = ""
-	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "in_progress", Role: "assistant", Phase: "final_answer", Content: []responsesMessageContentPart{}}
+	w.textFollowedByTool = false
+	// added 阶段尚不知道这是工具前说明还是最终回答；phase 缺省是 Responses
+	// 明确支持的兼容形态，结束 item 时再给出准确 phase。
+	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "in_progress", Role: "assistant", Content: []responsesMessageContentPart{}}
 	ev, _ := json.Marshal(responsesOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(ev))
 	part, _ := json.Marshal(responsesContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesMessageContentPart{Type: "output_text", Text: "", Annotations: []any{}, Logprobs: []any{}}})
@@ -879,7 +891,11 @@ func (w *responsesStreamWriter) endText(out *[][]byte) {
 	*out = append(*out, sseData(done))
 	cd, _ := json.Marshal(responsesContentPartDoneEvent{Type: "response.content_part.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesMessageContentPart{Type: "output_text", Text: w.textAccum, Annotations: []any{}, Logprobs: []any{}}})
 	*out = append(*out, sseData(cd))
-	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer", Content: []responsesMessageContentPart{{Type: "output_text", Text: w.textAccum, Annotations: []any{}, Logprobs: []any{}}}}
+	phase := "final_answer"
+	if w.forceFollowUp || w.textFollowedByTool {
+		phase = "commentary"
+	}
+	item := responsesMessageItem{ID: w.itemID, Type: "message", Status: "completed", Role: "assistant", Phase: phase, Content: []responsesMessageContentPart{{Type: "output_text", Text: w.textAccum, Annotations: []any{}, Logprobs: []any{}}}}
 	oid, _ := json.Marshal(responsesOutputItemDoneEvent{Type: "response.output_item.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(oid))
 	w.outputItems = append(w.outputItems, item)
@@ -1006,6 +1022,9 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		out = append(out, sseData(evt))
 	case "tool_start":
 		if w.blockType != "" {
+			if w.blockType == "text" {
+				w.textFollowedByTool = true
+			}
 			w.endBlock(&out)
 		}
 		w.beginTool(ev, &out)
@@ -1024,6 +1043,9 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.endBlock(&out)
 		}
 	case "finish":
+		if w.blockType == "text" && ev.Finish == "stop" && shouldContinueAfterPrelude(w.textAccum, w.meta) {
+			w.forceFollowUp = true
+		}
 		if w.blockType != "" {
 			w.endBlock(&out)
 		}
@@ -1038,6 +1060,9 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.emitCompleted(model, &out)
 		}
 	case "done":
+		if w.blockType == "text" && shouldContinueAfterPrelude(w.textAccum, w.meta) {
+			w.forceFollowUp = true
+		}
 		if w.blockType != "" {
 			w.endBlock(&out)
 		}
