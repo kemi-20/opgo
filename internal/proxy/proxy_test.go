@@ -1573,6 +1573,64 @@ func TestSuccessfulResponseWithoutUsageLogsWarning(t *testing.T) {
 	}
 }
 
+func TestMuseResponsesStreamKeepsSilentConnectionAlive(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path=%s, want /responses", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// 模拟 Muse 长思考阶段：响应头已到，但一段时间没有任何 SSE 事件。
+		time.Sleep(85 * time.Millisecond)
+		fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_muse\",\"status\":\"in_progress\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_muse\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n")
+	}))
+	defer upstream.Close()
+
+	p, _ := newTestProxy(t, upstream.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["muse-spark-1.2-contributor"]
+		pr.Transformation = "openai_responses"
+		c.Pricing["muse-spark-1.2-contributor"] = pr
+	})
+	p.streamHeartbeatInterval = 20 * time.Millisecond
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"muse-spark-1.2-contributor","stream":true,"input":"say hi"}`
+	status, responseBody, _ := doReq(t, srv, http.MethodPost, "/v1/responses", testUser1, body)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, responseBody)
+	}
+	if n := strings.Count(responseBody, ": keep-alive\n\n"); n < 2 {
+		t.Fatalf("静默期心跳数=%d, want >=2; body=%q", n, responseBody)
+	}
+	if !strings.Contains(responseBody, `"type":"response.completed"`) ||
+		!strings.Contains(responseBody, `"total_tokens":12`) {
+		t.Fatalf("心跳后未完整收到原生 completed/usage: %s", responseBody)
+	}
+}
+
+func TestSSEHeartbeatIsSurgicalToMuse(t *testing.T) {
+	tests := map[string]bool{
+		"muse-spark-1.2-contributor": true,
+		"muse-spark-1.2":             false,
+		"mimo-v2.5":                  false,
+		"hy3":                        false,
+		"deepseek-v4-flash":          false,
+		"gpt-5.6-luna":               false,
+		"":                           false,
+	}
+	for model, want := range tests {
+		if got := shouldSendSSEHeartbeat(model); got != want {
+			t.Errorf("shouldSendSSEHeartbeat(%q)=%v, want %v", model, got, want)
+		}
+	}
+}
+
 func TestTransformedResponsesCacheWriteBilling(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		name := "non-stream"

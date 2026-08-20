@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -41,14 +42,18 @@ type Proxy struct {
 	userLocks map[string]*sync.Mutex
 	rate      *rateLimiter
 	boost     *boostTracker
+	// Muse 的原生 Responses 流可能在长思考阶段完全静默。定期发送 SSE
+	// 注释心跳，避免部分 fetch 实现把健康连接误判为空闲断线。
+	streamHeartbeatInterval time.Duration
 }
 
 func New(cfg *config.Manager, db *store.Store, indexHTML []byte, bal BalanceSource, log *slog.Logger) *Proxy {
 	return &Proxy{
 		cfg: cfg, db: db, indexHTML: indexHTML, log: log, balance: bal,
-		userLocks: map[string]*sync.Mutex{},
-		rate:      newRateLimiter(),
-		boost:     newBoostTracker(),
+		userLocks:               map[string]*sync.Mutex{},
+		rate:                    newRateLimiter(),
+		boost:                   newBoostTracker(),
+		streamHeartbeatInterval: 15 * time.Second,
 		transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -354,6 +359,10 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 	got := false
 	discard := false // 客户端断开：继续读上游解析 usage 计费，不再写出
 	flusher, _ := w.(http.Flusher)
+	// 尽快把上游已经返回的 SSE 响应头送到客户端，不等待首个 data 事件。
+	if flusher != nil {
+		flusher.Flush()
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 8<<20)
 	writeChunks := func(chunks [][]byte) bool {
@@ -367,8 +376,63 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 		}
 		return true
 	}
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	type scanResult struct {
+		line []byte
+		err  error
+	}
+	// 不绑定下游 request context：客户端断开后，若上游 body 中已经缓存了末尾
+	// usage，仍要尽量读完并记账；函数返回时再显式停止扫描 goroutine。
+	scanCtx, cancelScan := context.WithCancel(context.Background())
+	defer cancelScan()
+	scanCh := make(chan scanResult)
+	go func() {
+		defer close(scanCh)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case scanCh <- scanResult{line: line}:
+			case <-scanCtx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			select {
+			case scanCh <- scanResult{err: err}:
+			case <-scanCtx.Done():
+			}
+		}
+	}()
+
+	// 只对 Muse 启用。SSE 注释不属于 data 事件，OpenAI/Anthropic 客户端
+	// 都会忽略它，因此不会改变 Responses 内容、工具调用或计费解析。
+	var heartbeat <-chan time.Time
+	var heartbeatTicker *time.Ticker
+	if shouldSendSSEHeartbeat(model) && p.streamHeartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(p.streamHeartbeatInterval)
+		heartbeat = heartbeatTicker.C
+		defer heartbeatTicker.Stop()
+	}
+
+	var scanErr error
+streamLoop:
+	for {
+		var line []byte
+		select {
+		case result, ok := <-scanCh:
+			if !ok {
+				break streamLoop
+			}
+			if result.err != nil {
+				scanErr = result.err
+				break streamLoop
+			}
+			line = result.line
+		case <-heartbeat:
+			if !discard && !writeChunks([][]byte{[]byte(": keep-alive\n\n")}) {
+				discard = true
+			}
+			continue
+		}
 		if discard {
 			// 客户端断开后仍解析 usage（usage 事件在上游流末尾）
 			if u, ok := meter.ParseSSEUsage(line); ok {
@@ -402,11 +466,11 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 			continue
 		}
 		if done {
-			break
+			break streamLoop
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		p.log.Warn("读取上游流失败", "err", err, "uuid", user.UUID, "model", model, "endpoint", r.URL.Path)
+	if scanErr != nil {
+		p.log.Warn("读取上游流失败", "err", scanErr, "uuid", user.UUID, "model", model, "endpoint", r.URL.Path)
 	}
 	// 循环结束（done 或 EOF）：统一补齐一次终止事件（[DONE] / message_stop / ping）。
 	// Feed(done) 后 writer 不再自行输出终止事件，因此 Close() 只调用一次不会重复。
@@ -419,6 +483,10 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 		p.log.Warn("上游成功流缺少可解析 usage，本次未计费",
 			"uuid", user.UUID, "model", model, "endpoint", r.URL.Path, "stream", true)
 	}
+}
+
+func shouldSendSSEHeartbeat(model string) bool {
+	return model == "muse-spark-1.2-contributor"
 }
 
 // mergeUsage 合并一次用量到累计（补全字段）。
