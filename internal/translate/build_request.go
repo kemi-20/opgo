@@ -275,8 +275,15 @@ func buildOpenAIResponsesRequest(req *Request) ([]byte, error) {
 	if req.ReasoningEffort != "" {
 		out["reasoning"] = map[string]any{"effort": req.ReasoningEffort}
 	}
-	if req.Instructions != "" {
-		out["instructions"] = req.Instructions
+	instructions := req.Instructions
+	if system := blocksToText(req.System); system != "" {
+		if instructions != "" {
+			instructions += "\n"
+		}
+		instructions += system
+	}
+	if instructions != "" {
+		out["instructions"] = instructions
 	}
 	// 注意：上游（gpt-5.6-luna）rejects include:["usage"]（400），且默认就在
 	// response.completed / 非流式 usage 中返回用量，因此这里不再注入 include。

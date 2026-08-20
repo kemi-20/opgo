@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -344,7 +345,8 @@ func parseAnthropicRequest(raw []byte) (*Request, error) {
 			Description string          `json:"description"`
 			InputSchema json.RawMessage `json:"input_schema"`
 		} `json:"tools"`
-		Thinking *struct {
+		ToolChoice json.RawMessage `json:"tool_choice"`
+		Thinking   *struct {
 			Type         string `json:"type"`
 			BudgetTokens int    `json:"budget_tokens"`
 		} `json:"thinking"`
@@ -374,14 +376,36 @@ func parseAnthropicRequest(raw []byte) (*Request, error) {
 			}
 		}
 	}
-	if len(obj.System) > 0 {
-		req.System = parseTextOrBlocks(any(obj.System))
-		if req.System == nil {
-			var s string
-			if json.Unmarshal(obj.System, &s) == nil && s != "" {
-				req.System = []Block{{Type: "text", Text: s}}
+	if len(obj.ToolChoice) > 0 && string(obj.ToolChoice) != "null" {
+		var choice struct {
+			Type                   string `json:"type"`
+			Name                   string `json:"name"`
+			DisableParallelToolUse *bool  `json:"disable_parallel_tool_use"`
+		}
+		if err := json.Unmarshal(obj.ToolChoice, &choice); err != nil {
+			return nil, errf("解析 anthropic tool_choice 失败: %w", err)
+		}
+		switch choice.Type {
+		case "auto", "none":
+			req.ToolChoice = json.RawMessage(`"` + choice.Type + `"`)
+		case "any":
+			req.ToolChoice = json.RawMessage(`"required"`)
+		case "tool":
+			if choice.Name != "" {
+				req.ToolChoice = json.RawMessage(`{"type":"function","name":` + strconv.Quote(choice.Name) + `}`)
 			}
 		}
+		if choice.DisableParallelToolUse != nil {
+			parallel := !*choice.DisableParallelToolUse
+			req.ParallelToolCalls = &parallel
+		}
+	}
+	if len(obj.System) > 0 {
+		var systemValue any
+		if err := json.Unmarshal(obj.System, &systemValue); err != nil {
+			return nil, errf("解析 anthropic system 失败: %w", err)
+		}
+		req.System = parseTextOrBlocks(systemValue)
 	}
 	for _, m := range obj.Messages {
 		msg := Message{Role: m.Role}

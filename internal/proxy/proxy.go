@@ -121,18 +121,22 @@ func (p *Proxy) serveIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) authUser(r *http.Request) (*config.User, string, bool) {
-	key := ""
+	var candidates []string
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		key = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		candidates = append(candidates, strings.TrimSpace(strings.TrimPrefix(h, "Bearer ")))
 	}
-	if key == "" {
-		key = strings.TrimSpace(r.Header.Get("x-api-key"))
+	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
+		candidates = append(candidates, key)
 	}
-	if key == "" || len(key) > 512 {
-		return nil, "", false
+	for _, key := range candidates {
+		if key == "" || len(key) > 512 {
+			continue
+		}
+		if u := p.cfg.Get().UserByKey(key); u != nil {
+			return u, key, true
+		}
 	}
-	u := p.cfg.Get().UserByKey(key)
-	return u, key, u != nil
+	return nil, "", false
 }
 
 func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {

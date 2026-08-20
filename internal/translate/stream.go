@@ -3,8 +3,6 @@ package translate
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/google/uuid"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +32,7 @@ type streamReader struct {
 	// responses 状态
 	responseStarted bool
 	msgOutputID     string
+	responseHasTool bool
 	// anthropic 状态
 	inThinking bool
 	inText     bool
@@ -206,6 +205,7 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 			case "message":
 				events = append(events, StreamEvent{Kind: "start", Text: "text"})
 			case "function_call":
+				r.responseHasTool = true
 				events = append(events, StreamEvent{Kind: "tool_start", ToolID: obj.Item.CallID, ToolName: obj.Item.Name})
 			}
 		}
@@ -218,17 +218,23 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 	case "response.output_text.delta":
 		events = append(events, StreamEvent{Kind: "text", Text: obj.Delta})
 	case "response.function_call_arguments.delta":
+		r.responseHasTool = true
 		events = append(events, StreamEvent{Kind: "tool_args", Args: obj.Delta})
 	case "response.output_item.done":
+		if obj.Item != nil && obj.Item.Type == "function_call" {
+			r.responseHasTool = true
+		}
 		// 结束当前块
 		events = append(events, StreamEvent{Kind: "end_block"})
 	case "response.completed":
 		if obj.Response != nil {
 			finish := "stop"
-			switch obj.Response.Status {
-			case "incomplete":
+			switch {
+			case obj.Response.Status == "completed" && r.responseHasTool:
+				finish = "tool_calls"
+			case obj.Response.Status == "incomplete":
 				finish = "length"
-			case "failed":
+			case obj.Response.Status == "failed":
 				finish = "content_filter"
 			}
 			events = append(events, StreamEvent{Kind: "finish", Finish: finish})
@@ -697,7 +703,7 @@ type responsesStreamWriter struct {
 }
 
 func newResponsesStreamWriter(meta *Request) *responsesStreamWriter {
-	return &responsesStreamWriter{meta: meta, respID: uuid.NewString(), createdAt: time.Now().Unix(), outputItems: []any{}}
+	return &responsesStreamWriter{meta: meta, respID: newResponsesID("resp"), createdAt: time.Now().Unix(), outputItems: []any{}}
 }
 
 // nextSeq 返回当前 sequence_number 并递增（对齐原生流式协议）。
@@ -777,7 +783,7 @@ func (w *responsesStreamWriter) ensureStarted(out *[][]byte) {
 func (w *responsesStreamWriter) beginReasoning(out *[][]byte) {
 	w.blockType = "reasoning"
 	w.reasonAccum = ""
-	w.itemID = "rs_" + strconv.Itoa(w.nextIndex)
+	w.itemID = newResponsesID("rs")
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "in_progress", Content: []responsesReasoningContentPart{}, Summary: []any{}}
@@ -800,7 +806,7 @@ func (w *responsesStreamWriter) endReasoning(out *[][]byte) {
 
 func (w *responsesStreamWriter) beginText(out *[][]byte) {
 	w.blockType = "text"
-	w.itemID = "msg_" + strconv.Itoa(w.nextIndex)
+	w.itemID = newResponsesID("msg")
 	w.outputIndex = w.nextIndex
 	w.nextIndex++
 	w.textAccum = ""
@@ -824,12 +830,12 @@ func (w *responsesStreamWriter) endText(out *[][]byte) {
 
 func (w *responsesStreamWriter) beginTool(ev StreamEvent, out *[][]byte) {
 	w.blockType = "tool"
-	// item id 用独立 UUID，call_id 保留上游工具调用 ID（对齐原生 responses）。
+	// item id 独立且跨请求唯一，call_id 优先保留上游工具调用 ID。
 	callID := ev.ToolID
 	if callID == "" {
-		callID = "fc_" + ev.ToolName
+		callID = newResponsesID("call")
 	}
-	w.itemID = uuid.NewString()
+	w.itemID = newResponsesID("fc")
 	w.toolCallID = callID
 	w.toolName = ev.ToolName
 	w.outputIndex = w.nextIndex

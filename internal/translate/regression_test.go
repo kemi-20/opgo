@@ -6,6 +6,99 @@ import (
 	"testing"
 )
 
+func TestAnthropicSystemBlockArrayPreserved(t *testing.T) {
+	raw := []byte(`{
+		"model":"mimo-v2.5","max_tokens":100,
+		"system":[
+			{"type":"text","text":"first instruction","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"second instruction"}
+		],
+		"messages":[{"role":"user","content":"hello"}]
+	}`)
+
+	for _, target := range []Format{FormatOpenAICompletions, FormatOpenAIResponses} {
+		out, err := ConvertRequest(FormatAnthropic, target, raw)
+		if err != nil {
+			t.Fatalf("转为 %s: %v", target, err)
+		}
+		text := string(out)
+		if !strings.Contains(text, "first instruction") || !strings.Contains(text, "second instruction") {
+			t.Errorf("转为 %s 时丢失 system 块: %s", target, out)
+		}
+	}
+}
+
+func TestAnthropicToolChoicePreserved(t *testing.T) {
+	raw := []byte(`{
+		"model":"mimo-v2.5","max_tokens":100,
+		"messages":[{"role":"user","content":"run it"}],
+		"tools":[{"name":"diagnostic_echo","description":"echo","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"diagnostic_echo","disable_parallel_tool_use":true}
+	}`)
+
+	for _, target := range []Format{FormatOpenAICompletions, FormatOpenAIResponses} {
+		out, err := ConvertRequest(FormatAnthropic, target, raw)
+		if err != nil {
+			t.Fatalf("转为 %s: %v", target, err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(out, &obj); err != nil {
+			t.Fatal(err)
+		}
+		if obj["parallel_tool_calls"] != false {
+			t.Errorf("转为 %s 时丢失 disable_parallel_tool_use: %s", target, out)
+		}
+		choice, _ := obj["tool_choice"].(map[string]any)
+		if choice == nil || choice["type"] != "function" {
+			t.Errorf("转为 %s 时丢失强制工具选择: %s", target, out)
+		}
+	}
+}
+
+func TestResponsesToolCallMapsToAnthropicToolUseStop(t *testing.T) {
+	nonStream := []byte(`{
+		"id":"resp_test","object":"response","status":"completed","model":"muse-spark-1.2-contributor",
+		"output":[
+			{"type":"message","content":[{"type":"output_text","text":"calling"}]},
+			{"type":"function_call","call_id":"call_1","name":"probe","arguments":"{}"}
+		]
+	}`)
+	out, err := ConvertResponse(FormatAnthropic, FormatOpenAIResponses, nonStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(out, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["stop_reason"] != "tool_use" {
+		t.Fatalf("非流式 Responses 工具调用 stop_reason=%v, want tool_use: %s", message["stop_reason"], out)
+	}
+
+	conv := NewStreamConverter(FormatOpenAIResponses, FormatAnthropic, "muse-spark-1.2-contributor")
+	lines := []string{
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"probe","arguments":""}}`,
+		`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{}"}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"probe","arguments":"{}"}}`,
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
+	}
+	var stopReason string
+	for _, line := range lines {
+		chunks, _ := conv.Feed([]byte(line))
+		for _, chunk := range chunks {
+			payload := strings.TrimSpace(strings.TrimPrefix(string(chunk), "data:"))
+			var event map[string]any
+			if json.Unmarshal([]byte(payload), &event) == nil && event["type"] == "message_delta" {
+				delta, _ := event["delta"].(map[string]any)
+				stopReason, _ = delta["stop_reason"].(string)
+			}
+		}
+	}
+	if stopReason != "tool_use" {
+		t.Fatalf("流式 Responses 工具调用 stop_reason=%q, want tool_use", stopReason)
+	}
+}
+
 // TestResponsesAssistantTurnMergedLikeCLIProxyAPI 验证 Responses 的同轮输出不会被
 // 拆成多个连续 assistant 消息。Codex 会把 reasoning、可见进度文本和 function_call
 // 分成顶层项；Chat Completions 历史必须还原为一条 assistant 消息。

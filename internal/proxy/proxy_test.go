@@ -181,6 +181,30 @@ func doReqH(t *testing.T, srv *httptest.Server, method, path, auth, body string,
 
 const chatBody = "{\"model\":\"mimo-v2.5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
 
+func TestAuthUserAcceptsValidXAPIKeyWhenBearerIsUnrelated(t *testing.T) {
+	p, _ := newTestProxy(t, "http://127.0.0.1:1", &fixedBalance{snap: okSnapshot()}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer claude-internal-oauth-token")
+	req.Header.Set("x-api-key", testUser1)
+
+	user, key, ok := p.authUser(req)
+	if !ok || user == nil || user.UUID != "uuid-1" || key != testUser1 {
+		t.Fatalf("应使用有效 x-api-key 认证，got ok=%v user=%v", ok, user)
+	}
+}
+
+func TestAuthUserStillAcceptsValidBearerWhenXAPIKeyIsInvalid(t *testing.T) {
+	p, _ := newTestProxy(t, "http://127.0.0.1:1", &fixedBalance{snap: okSnapshot()}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+testUser1)
+	req.Header.Set("x-api-key", "invalid-secondary-key")
+
+	user, key, ok := p.authUser(req)
+	if !ok || user == nil || user.UUID != "uuid-1" || key != testUser1 {
+		t.Fatalf("应使用有效 Bearer 认证，got ok=%v user=%v", ok, user)
+	}
+}
+
 func TestForwardNonStream(t *testing.T) {
 	fu := &fakeUpstream{}
 	up := httptest.NewServer(fu.handler())

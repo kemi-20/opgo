@@ -173,7 +173,11 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 	rc.Reasoning = reasoning.String()
 	rc.Text = text.String()
 	rc.ToolCalls = toolCalls
-	rc.FinishReason = responsesStatusToFinish(obj.Status)
+	if len(toolCalls) > 0 && obj.Status == "completed" {
+		rc.FinishReason = "tool_calls"
+	} else {
+		rc.FinishReason = responsesStatusToFinish(obj.Status)
+	}
 	resp.Choices = append(resp.Choices, rc)
 	if obj.Usage != nil {
 		resp.Usage.PromptTokens = obj.Usage.InputTokens
@@ -350,11 +354,12 @@ type responsesNonStreamResponse struct {
 }
 
 func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, error) {
+	responseID := newResponsesID("resp")
 	output := make([]any, 0, 4)
 	// reasoning（对齐原生：content 为 reasoning_text，summary 为空数组）
 	if len(resp.Choices) > 0 && resp.Choices[0].Reasoning != "" {
 		output = append(output, responsesReasoningItem{
-			ID: "rs_" + resp.ID, Type: "reasoning", Status: "completed",
+			ID: newResponsesID("rs"), Type: "reasoning", Status: "completed",
 			Content: []responsesReasoningContentPart{{Type: "reasoning_text", Text: resp.Choices[0].Reasoning}},
 			Summary: []any{},
 		})
@@ -362,7 +367,7 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 	for _, c := range resp.Choices {
 		if c.Text != "" || len(c.ToolCalls) == 0 {
 			output = append(output, responsesMessageItem{
-				ID: "msg_" + resp.ID, Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer",
+				ID: newResponsesID("msg"), Type: "message", Status: "completed", Role: "assistant", Phase: "final_answer",
 				Content: []responsesMessageContentPart{{Type: "output_text", Text: c.Text, Annotations: []any{}, Logprobs: []any{}}},
 			})
 		}
@@ -373,7 +378,7 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 			}
 			// item id 用独立 UUID，call_id 保留上游工具调用 ID（对齐原生 responses）
 			output = append(output, responsesFunctionCallItem{
-				ID: uuid.NewString(), Type: "function_call", Status: "completed",
+				ID: newResponsesID("fc"), Type: "function_call", Status: "completed",
 				Name: tc.Name, CallID: tc.ID, Arguments: argsStr,
 			})
 		}
@@ -436,7 +441,7 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 		created = time.Now().Unix()
 	}
 	out := responsesNonStreamResponse{
-		ID: orDefault(resp.ID, "resp_opgo"), Object: "response",
+		ID: responseID, Object: "response",
 		CreatedAt: created, CompletedAt: created, Status: "completed",
 		ParallelToolCalls: parallel, Temperature: temp, TopP: topp,
 		MaxOutputTokens: maxOut, PreviousResponseID: nil, Background: false,
@@ -509,6 +514,13 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// newResponsesID 生成与原生 Responses 相同风格的、不透明且跨请求唯一的 ID。
+// 不能只使用 output_index：Codex 会跨多轮工具调用按 item ID 维护界面状态，
+// 重复的 msg_0/rs_0 会让旧消息被错误覆盖、重排，甚至显示为仍在执行。
+func newResponsesID(prefix string) string {
+	return prefix + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 }
 
 // blocksToText 将 Block 列表拼接为纯文本（用于 instructions 字段回填）。
