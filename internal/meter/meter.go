@@ -21,6 +21,7 @@ type Usage struct {
 	TotalTokens       int64
 	CachedTokens      int64 // 缓存读取（OpenAI cached_tokens / Anthropic cache_read）
 	CachedWriteTokens int64 // 缓存写入（Anthropic cache_creation）
+	ReasoningTokens   int64 // 推理 token（属于 completion 子集，仅用于明细审计，不重复计费）
 }
 
 // USDToUnits 美元金额转整数微元。
@@ -88,6 +89,7 @@ func EnsureStreamUsage(body []byte) ([]byte, bool) {
 	out = append(out, body[off+1:]...)
 	return out, true
 }
+
 // usageJSON 同时兼容 OpenAI 与 Anthropic 的用量字段。
 type usageJSON struct {
 	PromptTokens        int64 `json:"prompt_tokens"`
@@ -98,11 +100,19 @@ type usageJSON struct {
 	CacheRead           int64 `json:"cache_read_input_tokens"`
 	CacheCreation       int64 `json:"cache_creation_input_tokens"`
 	PromptTokensDetails *struct {
-		CachedTokens int64 `json:"cached_tokens"`
+		CachedTokens     int64 `json:"cached_tokens"`
+		CacheWriteTokens int64 `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 	InputTokensDetails *struct {
-		CachedTokens int64 `json:"cached_tokens"`
+		CachedTokens     int64 `json:"cached_tokens"`
+		CacheWriteTokens int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	OutputTokensDetails *struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
 }
 
 func (u *usageJSON) usage() (Usage, bool) {
@@ -111,6 +121,10 @@ func (u *usageJSON) usage() (Usage, bool) {
 		us := Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, TotalTokens: u.TotalTokens}
 		if u.PromptTokensDetails != nil {
 			us.CachedTokens = u.PromptTokensDetails.CachedTokens
+			us.CachedWriteTokens = u.PromptTokensDetails.CacheWriteTokens
+		}
+		if u.CompletionTokensDetails != nil {
+			us.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
 		}
 		return us, true
 	}
@@ -120,13 +134,21 @@ func (u *usageJSON) usage() (Usage, bool) {
 		if cached == 0 && u.InputTokensDetails != nil {
 			cached = u.InputTokensDetails.CachedTokens
 		}
-		return Usage{
+		cacheWrite := u.CacheCreation
+		if cacheWrite == 0 && u.InputTokensDetails != nil {
+			cacheWrite = u.InputTokensDetails.CacheWriteTokens
+		}
+		us := Usage{
 			PromptTokens:      u.InputTokens,
 			CompletionTokens:  u.OutputTokens,
 			TotalTokens:       u.InputTokens + u.OutputTokens,
 			CachedTokens:      cached,
-			CachedWriteTokens: u.CacheCreation,
-		}, true
+			CachedWriteTokens: cacheWrite,
+		}
+		if u.OutputTokensDetails != nil {
+			us.ReasoningTokens = u.OutputTokensDetails.ReasoningTokens
+		}
+		return us, true
 	}
 	if u.TotalTokens > 0 {
 		// 只有总数时兜底

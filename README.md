@@ -4,12 +4,13 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
+- Muse 原生搜索兼容：仅对 `muse-spark-1.2-contributor` 发往 Responses 的 `web_search` 工具强制删除上游不支持的 `search_content_types`；模型名、协议、工具类型或字段任一不匹配时逐字节不修改，且无需配置
 - 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.2-contributor 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
 - 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
 - 总池保护：以上游实时余量接口为准，额度用尽即 429
-- 流式请求照常计费（自动注入 include_usage，兼容 OpenAI / Anthropic 协议）
+- 流式请求照常计费（Chat Completions 自动注入 include_usage；Responses / Anthropic 读取标准末尾 usage）
 - SQLite 记录全部用量
 - Web 查询页：普通用户查自己，管理员看全部用户与总池
 - 密钥防泄露：任何接口/前端都不返回任何 key；内置 `opgo -audit` 自检
@@ -228,7 +229,7 @@ opgo -audit -config /opt/opgo/config.jsonc
 ## 数据查询
 
 ```bash
-sqlite3 /opt/opgo/usage.db "select uuid, model, total_tokens, cost_units, datetime(created_at_epoch_ms/1000,'unixepoch') from usage order by id desc limit 20;"
+sqlite3 /opt/opgo/usage.db "select uuid, model, total_tokens, cached_write_tokens, reasoning_tokens, cost_units, datetime(created_at_epoch_ms/1000,'unixepoch') from usage order by id desc limit 20;"
 ```
 
 ## 发布

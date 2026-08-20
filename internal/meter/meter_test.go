@@ -28,6 +28,26 @@ func TestCostUnitsCached(t *testing.T) {
 	}
 }
 
+func TestCostUnitsCachedWrite(t *testing.T) {
+	p := config.ModelPricing{
+		InputPerMillion:       1.60,
+		OutputPerMillion:      7.20,
+		CachedReadPerMillion:  0.16,
+		CachedWritePerMillion: 2.00,
+	}
+	u := Usage{
+		PromptTokens:      1000,
+		CompletionTokens:  100,
+		CachedTokens:      200,
+		CachedWriteTokens: 300,
+	}
+	// 普通输入 500*1.60 + 缓存读 200*0.16 + 缓存写 300*2.00 + 输出 100*7.20
+	// = $0.002152，按 1e8 微元计为 215200。
+	if got := CostUnits(p, u); got != 215200 {
+		t.Errorf("cost = %d, want 215200", got)
+	}
+}
+
 func TestPrecisionOneThirdCent(t *testing.T) {
 	p := config.ModelPricing{InputPerMillion: 0.33333333}
 	u := Usage{PromptTokens: 3000000}
@@ -38,13 +58,43 @@ func TestPrecisionOneThirdCent(t *testing.T) {
 }
 
 func TestParseBodyUsageOpenAI(t *testing.T) {
-	body := []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":10}}}`)
+	body := []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":10,"cache_write_tokens":5},"completion_tokens_details":{"reasoning_tokens":20}}}`)
 	u, ok := ParseBodyUsage(body)
 	if !ok {
 		t.Fatal("应解析出 usage")
 	}
-	if u.PromptTokens != 100 || u.CompletionTokens != 50 || u.TotalTokens != 150 || u.CachedTokens != 10 {
+	if u.PromptTokens != 100 || u.CompletionTokens != 50 || u.TotalTokens != 150 || u.CachedTokens != 10 || u.CachedWriteTokens != 5 || u.ReasoningTokens != 20 {
 		t.Errorf("usage = %+v", u)
+	}
+}
+
+func TestParseBodyUsageResponsesCacheWrite(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":10,"cache_write_tokens":20},"output_tokens_details":{"reasoning_tokens":30}}}`)
+	u, ok := ParseBodyUsage(body)
+	if !ok {
+		t.Fatal("应解析出 Responses usage")
+	}
+	if u.PromptTokens != 100 || u.CompletionTokens != 50 || u.TotalTokens != 150 || u.CachedTokens != 10 || u.CachedWriteTokens != 20 || u.ReasoningTokens != 30 {
+		t.Errorf("usage = %+v", u)
+	}
+}
+
+func TestReasoningTokensNeverBecomeCachedWriteBilling(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":10},"output_tokens_details":{"reasoning_tokens":30}}}`)
+	u, ok := ParseBodyUsage(body)
+	if !ok {
+		t.Fatal("应解析出 Responses usage")
+	}
+	if u.CachedWriteTokens != 0 {
+		t.Fatalf("reasoning_tokens 不得进入缓存写计费，usage=%+v", u)
+	}
+	if u.ReasoningTokens != 30 {
+		t.Fatalf("reasoning_tokens 应独立保留，usage=%+v", u)
+	}
+	p := config.ModelPricing{InputPerMillion: 1, OutputPerMillion: 2, CachedWritePerMillion: 99}
+	// reasoning 已包含在 output_tokens=50 中，只能按输出价计一次。
+	if cost := CostUnits(p, u); cost != 19000 {
+		t.Fatalf("reasoning 被重复计费，cost=%d want=19000", cost)
 	}
 }
 
@@ -97,9 +147,9 @@ func TestParseSSEUsageAnthropicDelta(t *testing.T) {
 }
 
 func TestParseSSEUsageResponsesCompleted(t *testing.T) {
-	line := []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":2}}}}`)
+	line := []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":3},"output_tokens_details":{"reasoning_tokens":4}}}}`)
 	u, ok := ParseSSEUsage(line)
-	if !ok || u.PromptTokens != 10 || u.CachedTokens != 2 {
+	if !ok || u.PromptTokens != 10 || u.CachedTokens != 2 || u.CachedWriteTokens != 3 || u.ReasoningTokens != 4 {
 		t.Errorf("usage = %+v, ok=%v", u, ok)
 	}
 }

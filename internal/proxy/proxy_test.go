@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,6 +53,12 @@ func testConfigJSON(upstream string) string {
 
 func newTestProxy(t *testing.T, upstream string, bal BalanceSource, mutate func(*config.Config)) (*Proxy, *store.Store) {
 	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newTestProxyWithLogger(t, upstream, bal, mutate, log)
+}
+
+func newTestProxyWithLogger(t *testing.T, upstream string, bal BalanceSource, mutate func(*config.Config), log *slog.Logger) (*Proxy, *store.Store) {
+	t.Helper()
 	cfg, err := config.Parse([]byte(testConfigJSON(upstream)))
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +71,6 @@ func newTestProxy(t *testing.T, upstream string, bal BalanceSource, mutate func(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := config.NewManager(cfg, "", nil, log)
 	return New(mgr, db, []byte("<html>test</html>"), bal, log), db
 }
@@ -1518,5 +1524,102 @@ func TestResponsesPassthroughNoStreamOptionsInjection(t *testing.T) {
 	// 请求体其余部分原样
 	if string(fu.lastBody) != body {
 		t.Errorf("/responses 透传应保持请求体原样: got %s", fu.lastBody)
+	}
+}
+
+func TestSuccessfulResponseWithoutUsageLogsWarning(t *testing.T) {
+	tests := []struct {
+		name      string
+		streaming bool
+	}{
+		{name: "non-stream", streaming: false},
+		{name: "stream", streaming: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n")
+					fmt.Fprint(w, "data: [DONE]\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			defer upstream.Close()
+
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			p, _ := newTestProxyWithLogger(t, upstream.URL, &fixedBalance{snap: okSnapshot()}, nil, logger)
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			body := fmt.Sprintf(`{"model":"deepseek-v4-flash","stream":%v,"messages":[{"role":"user","content":"hi"}]}`, tc.streaming)
+			status, _, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1, body)
+			if status != http.StatusOK {
+				t.Fatalf("status=%d", status)
+			}
+			got := logs.String()
+			if !strings.Contains(got, "缺少可解析 usage") || !strings.Contains(got, "deepseek-v4-flash") {
+				t.Fatalf("缺少 usage 时应留下可检索告警，logs=%s", got)
+			}
+			for _, secret := range []string{testMaster, testUser1, testUser2} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("usage 告警泄露 key: %s", got)
+				}
+			}
+		})
+	}
+}
+
+func TestTransformedResponsesCacheWriteBilling(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-stream"
+		if streaming {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/responses" {
+					t.Errorf("upstream path=%s, want /responses", r.URL.Path)
+				}
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+					fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1000,\"output_tokens\":100,\"total_tokens\":1100,\"input_tokens_details\":{\"cached_tokens\":200,\"cache_write_tokens\":300},\"output_tokens_details\":{\"reasoning_tokens\":40}}}}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":"resp_x","model":"gpt-5.6-luna","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":300},"output_tokens_details":{"reasoning_tokens":40}}}`)
+			}))
+			defer upstream.Close()
+
+			p, db := newTestProxy(t, upstream.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+				pr := c.Pricing["gpt-5.6-luna"]
+				pr.Transformation = "openai_responses"
+				c.Pricing["gpt-5.6-luna"] = pr
+			})
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			body := fmt.Sprintf(`{"model":"gpt-5.6-luna","stream":%v,"messages":[{"role":"user","content":"hi"}]}`, streaming)
+			status, responseBody, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1, body)
+			if status != http.StatusOK {
+				t.Fatalf("status=%d body=%s", status, responseBody)
+			}
+			// 普通输入 500*1.60 + 缓存读 200*0.16 + 缓存写 300*2.00 + 输出 100*7.20
+			// = $0.002152 = 215200 微元。reasoning_tokens=40 已包含在 output 中，不得另计。
+			sum, err := db.UserWindowSum("uuid-1", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum != 215200 {
+				t.Fatalf("cost_units=%d, want 215200", sum)
+			}
+			if !strings.Contains(responseBody, `"cache_write_tokens":300`) || !strings.Contains(responseBody, `"reasoning_tokens":40`) {
+				t.Fatalf("转换后的 usage 未完整保留 cache-write/reasoning: %s", responseBody)
+			}
+		})
 	}
 }

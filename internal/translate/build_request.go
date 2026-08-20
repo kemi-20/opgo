@@ -47,16 +47,50 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 		// 多个 system/instructions 块用换行分隔（避免 "A.B." 粘连）
 		msgs = append(msgs, map[string]any{"role": "system", "content": joinSystemBlocks(req.System)})
 	}
+	// Chat Completions 的 role=tool 只允许文本。工具结果中的图片/音频先累积，
+	// 等连续的 tool 消息全部写完后，再用紧随其后的 user 多模态消息交给模型。
+	var pendingToolMedia []Block
+	flushToolMedia := func() {
+		if len(pendingToolMedia) == 0 {
+			return
+		}
+		msgs = append(msgs, map[string]any{"role": "user", "content": blocksToOpenAIContent(pendingToolMedia)})
+		pendingToolMedia = nil
+	}
+	appendToolResult := func(callID string, blocks []Block, fallback string) {
+		text, media := splitToolContentForCompletions(blocks, fallback)
+		if text == "" && len(media) > 0 {
+			text = "Tool returned media attachments; see the following user message."
+		}
+		msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": callID, "content": text})
+		if len(media) > 0 {
+			pendingToolMedia = append(pendingToolMedia, toolMediaFollowupBlocks(callID, media)...)
+		}
+	}
 	for _, m := range req.Messages {
+		toolCarrier := m.Role == "tool" || (m.Role == "user" && hasToolResultBlock(m.Content))
+		if !toolCarrier {
+			if m.Role == "user" && len(pendingToolMedia) > 0 {
+				// 若工具结果后正好还有普通 user 内容，把附件并入该消息，避免产生
+				// 两条连续 user 消息；工具的 role=tool 文本仍已先行写入。
+				combined := append([]Block(nil), pendingToolMedia...)
+				pendingToolMedia = nil
+				if len(m.Content) > 0 {
+					combined = append(combined, m.Content...)
+				} else if m.Text != "" {
+					combined = append(combined, Block{Type: "text", Text: m.Text})
+				}
+				m.Content = combined
+				m.Text = ""
+			} else {
+				flushToolMedia()
+			}
+		}
 		mm := map[string]any{"role": m.Role}
 		switch m.Role {
 		case "tool":
-			mm["tool_call_id"] = m.ToolCallID
-			if len(m.Content) > 0 {
-				mm["content"] = blocksToOpenAIContent(m.Content)
-			} else {
-				mm["content"] = m.Text
-			}
+			appendToolResult(m.ToolCallID, m.Content, m.Text)
+			continue
 		case "assistant":
 			var textParts []Block
 			var thinking string
@@ -101,8 +135,7 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 			if len(m.Content) > 0 && hasToolResultBlock(m.Content) {
 				for _, b := range m.Content {
 					if b.Type == "tool_result" {
-						mm2 := map[string]any{"role": "tool", "tool_call_id": b.ToolUseID, "content": toolResultText(b.Content)}
-						msgs = append(msgs, mm2)
+						appendToolResult(b.ToolUseID, toolResultBlocks(b.Content), toolResultText(b.Content))
 					}
 				}
 				// 同一 user 消息中除工具结果外的普通文本（如 "结果拿到了，现在做 X"）
@@ -114,7 +147,11 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 					}
 				}
 				if len(extra) > 0 {
-					msgs = append(msgs, map[string]any{"role": "user", "content": blocksToOpenAIContent(extra)})
+					// 同一轮的附件与普通 user 内容合并，避免连续 user 消息，同时保证
+					// 所有 tool 结果仍排在附件之前。
+					combined := append(append([]Block(nil), pendingToolMedia...), extra...)
+					pendingToolMedia = nil
+					msgs = append(msgs, map[string]any{"role": "user", "content": blocksToOpenAIContent(combined)})
 				}
 				continue
 			} else if len(m.Content) > 0 {
@@ -131,6 +168,7 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 		}
 		msgs = append(msgs, mm)
 	}
+	flushToolMedia()
 	out["messages"] = msgs
 	// tools
 	if len(req.Tools) > 0 {
@@ -181,6 +219,65 @@ func hasToolResultBlock(blocks []Block) bool {
 		}
 	}
 	return false
+}
+
+// splitToolContentForCompletions 把工具结果拆成 Chat Completions 可接受的
+// role=tool 纯文本，以及必须放到后续 user 消息中的多模态附件。
+func splitToolContentForCompletions(blocks []Block, fallback string) (string, []Block) {
+	if len(blocks) == 0 {
+		return fallback, nil
+	}
+	var textParts []string
+	var media []Block
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				textParts = append(textParts, b.Text)
+			}
+		case "image", "audio":
+			media = append(media, b)
+		case "tool_result":
+			t, nestedMedia := splitToolContentForCompletions(toolResultBlocks(b.Content), "")
+			if t != "" {
+				textParts = append(textParts, t)
+			}
+			media = append(media, nestedMedia...)
+		}
+	}
+	text := strings.Join(textParts, "\n")
+	if text == "" {
+		text = fallback
+	}
+	return text, media
+}
+
+func toolMediaFollowupBlocks(callID string, media []Block) []Block {
+	label := "Tool output attachments"
+	if callID != "" {
+		label += " for call " + callID
+	}
+	out := make([]Block, 0, len(media)+1)
+	out = append(out, Block{Type: "text", Text: label + ":"})
+	out = append(out, media...)
+	return out
+}
+
+// toolResultBlocks 解析 Claude/Responses 工具结果内容，统一保留文本、图片和音频。
+func toolResultBlocks(raw json.RawMessage) []Block {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		if blocks := parseTextOrBlocks(value); len(blocks) > 0 {
+			return blocks
+		}
+		if value == nil {
+			return nil
+		}
+	}
+	return []Block{{Type: "text", Text: string(raw)}}
 }
 
 func blocksToOpenAIContent(blocks []Block) any {

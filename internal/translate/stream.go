@@ -39,6 +39,11 @@ type streamReader struct {
 	toolName   string
 	toolID     string
 	curToolIdx int
+	// Anthropic 把输入/cache usage 放在 message_start，把输出 usage 放在
+	// message_delta；这里合并后只向目标 writer 发一次完整 usage。
+	anthropicUsage        Usage
+	anthropicUsageSeen    bool
+	anthropicUsageEmitted bool
 }
 
 func newStreamReader() *streamReader { return &streamReader{toolIdx: -1, curToolIdx: -1} }
@@ -80,7 +85,8 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 			CompletionTokens    int64 `json:"completion_tokens"`
 			TotalTokens         int64 `json:"total_tokens"`
 			PromptTokensDetails *struct {
-				CachedTokens int64 `json:"cached_tokens"`
+				CachedTokens     int64 `json:"cached_tokens"`
+				CacheWriteTokens int64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -138,10 +144,10 @@ func (r *streamReader) readCompletionsLine(line []byte) []StreamEvent {
 		}
 		if obj.Usage.PromptTokensDetails != nil {
 			u.CachedTokens = obj.Usage.PromptTokensDetails.CachedTokens
+			u.CachedWriteTokens = obj.Usage.PromptTokensDetails.CacheWriteTokens
 		}
 		if obj.Usage.CompletionTokensDetails != nil {
-			// 复用 CachedWriteTokens 作为 reasoning_tokens 的载体（仅用于转换输出回显，不参与计费）
-			u.CachedWriteTokens = obj.Usage.CompletionTokensDetails.ReasoningTokens
+			u.ReasoningTokens = obj.Usage.CompletionTokensDetails.ReasoningTokens
 		}
 		events = append(events, StreamEvent{Kind: "usage", Usage: u})
 	}
@@ -181,7 +187,8 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 				OutputTokens       int64 `json:"output_tokens"`
 				TotalTokens        int64 `json:"total_tokens"`
 				InputTokensDetails *struct {
-					CachedTokens int64 `json:"cached_tokens"`
+					CachedTokens     int64 `json:"cached_tokens"`
+					CacheWriteTokens int64 `json:"cache_write_tokens"`
 				} `json:"input_tokens_details"`
 				OutputTokensDetails *struct {
 					ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -246,9 +253,10 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 				}
 				if obj.Response.Usage.InputTokensDetails != nil {
 					u.CachedTokens = obj.Response.Usage.InputTokensDetails.CachedTokens
+					u.CachedWriteTokens = obj.Response.Usage.InputTokensDetails.CacheWriteTokens
 				}
 				if obj.Response.Usage.OutputTokensDetails != nil {
-					u.CachedWriteTokens = obj.Response.Usage.OutputTokensDetails.ReasoningTokens
+					u.ReasoningTokens = obj.Response.Usage.OutputTokensDetails.ReasoningTokens
 				}
 				events = append(events, StreamEvent{Kind: "usage", Usage: u})
 			}
@@ -262,6 +270,33 @@ func (r *streamReader) readResponsesLine(line []byte) []StreamEvent {
 }
 
 // ---------- Anthropic SSE 读取器 ----------
+
+type anthropicStreamUsage struct {
+	InputTokens   int64 `json:"input_tokens"`
+	OutputTokens  int64 `json:"output_tokens"`
+	CacheRead     int64 `json:"cache_read_input_tokens"`
+	CacheCreation int64 `json:"cache_creation_input_tokens"`
+}
+
+func (r *streamReader) mergeAnthropicUsage(u *anthropicStreamUsage) {
+	if u == nil {
+		return
+	}
+	r.anthropicUsageSeen = true
+	if u.InputTokens > 0 {
+		r.anthropicUsage.PromptTokens = u.InputTokens
+	}
+	if u.OutputTokens > 0 {
+		r.anthropicUsage.CompletionTokens = u.OutputTokens
+	}
+	if u.CacheRead > 0 {
+		r.anthropicUsage.CachedTokens = u.CacheRead
+	}
+	if u.CacheCreation > 0 {
+		r.anthropicUsage.CachedWriteTokens = u.CacheCreation
+	}
+	r.anthropicUsage.TotalTokens = r.anthropicUsage.PromptTokens + r.anthropicUsage.CompletionTokens
+}
 
 func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 	s := strings.TrimSpace(string(line))
@@ -290,12 +325,10 @@ func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 			PartialJSON string `json:"partial_json"`
 			StopReason  string `json:"stop_reason"`
 		} `json:"delta"`
-		Usage *struct {
-			InputTokens   int64 `json:"input_tokens"`
-			OutputTokens  int64 `json:"output_tokens"`
-			CacheRead     int64 `json:"cache_read_input_tokens"`
-			CacheCreation int64 `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
+		Usage   *anthropicStreamUsage `json:"usage"`
+		Message *struct {
+			Usage *anthropicStreamUsage `json:"usage"`
+		} `json:"message"`
 		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -306,7 +339,9 @@ func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 	var events []StreamEvent
 	switch obj.Type {
 	case "message_start":
-		// no output
+		if obj.Message != nil {
+			r.mergeAnthropicUsage(obj.Message.Usage)
+		}
 	case "content_block_start":
 		if obj.ContentBlock != nil {
 			switch obj.ContentBlock.Type {
@@ -345,16 +380,21 @@ func (r *streamReader) readAnthropicLine(line []byte) []StreamEvent {
 			events = append(events, StreamEvent{Kind: "finish", Finish: mapAnthropicStopToOpenAI(obj.Delta.StopReason)})
 		}
 		if obj.Usage != nil {
-			u := &Usage{
-				PromptTokens:      obj.Usage.InputTokens,
-				CompletionTokens:  obj.Usage.OutputTokens,
-				TotalTokens:       obj.Usage.InputTokens + obj.Usage.OutputTokens,
-				CachedTokens:      obj.Usage.CacheRead,
-				CachedWriteTokens: obj.Usage.CacheCreation,
-			}
-			events = append(events, StreamEvent{Kind: "usage", Usage: u})
+			r.mergeAnthropicUsage(obj.Usage)
+			u := r.anthropicUsage
+			r.anthropicUsageEmitted = true
+			events = append(events, StreamEvent{Kind: "usage", Usage: &u})
 		}
 	case "message_stop":
+		if r.anthropicUsageSeen && !r.anthropicUsageEmitted {
+			// 非标准/截断流没有 message_delta 时，上游没有提供精确
+			// output_tokens，不能根据文本字节数伪造 token。这里只向客户端
+			// 转发已知的 input/cache 明细；代理计费独立解析上游原始 SSE，
+			// 不会读取这条转换后的 usage。
+			u := r.anthropicUsage
+			r.anthropicUsageEmitted = true
+			events = append(events, StreamEvent{Kind: "usage", Usage: &u})
+		}
 		events = append(events, StreamEvent{Kind: "done"})
 	case "error":
 		events = append(events, StreamEvent{Kind: "error", Error: payload})
@@ -448,15 +488,22 @@ func (w *completionsStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 		b, _ := json.Marshal(chunk)
 		return [][]byte{sseData(b)}
 	case "usage":
+		usage := map[string]any{
+			"prompt_tokens":     ev.Usage.PromptTokens,
+			"completion_tokens": ev.Usage.CompletionTokens,
+			"total_tokens":      ev.Usage.TotalTokens,
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens":      ev.Usage.CachedTokens,
+				"cache_write_tokens": ev.Usage.CachedWriteTokens,
+			},
+		}
+		if ev.Usage.ReasoningTokens > 0 {
+			usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": ev.Usage.ReasoningTokens}
+		}
 		chunk := map[string]any{
 			"id": "chatcmpl-opgo", "object": "chat.completion.chunk", "model": model,
 			"choices": []any{},
-			"usage": map[string]any{
-				"prompt_tokens":         ev.Usage.PromptTokens,
-				"completion_tokens":     ev.Usage.CompletionTokens,
-				"total_tokens":          ev.Usage.TotalTokens,
-				"prompt_tokens_details": map[string]any{"cached_tokens": ev.Usage.CachedTokens},
-			},
+			"usage":   usage,
 		}
 		b, _ := json.Marshal(chunk)
 		return [][]byte{sseData(b)}
@@ -505,7 +552,8 @@ type responsesResponseObj struct {
 }
 
 type responsesInputTokensDetails struct {
-	CachedTokens int64 `json:"cached_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 
 type responsesOutputTokensDetails struct {
@@ -884,11 +932,14 @@ func (w *responsesStreamWriter) emitCompleted(model string, out *[][]byte) {
 	var usage any
 	if w.pendingUsage != nil {
 		usage = responsesUsageObj{
-			InputTokens:         w.pendingUsage.PromptTokens,
-			OutputTokens:        w.pendingUsage.CompletionTokens,
-			TotalTokens:         w.pendingUsage.TotalTokens,
-			InputTokensDetails:  responsesInputTokensDetails{CachedTokens: w.pendingUsage.CachedTokens},
-			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: w.pendingUsage.CachedWriteTokens},
+			InputTokens:  w.pendingUsage.PromptTokens,
+			OutputTokens: w.pendingUsage.CompletionTokens,
+			TotalTokens:  w.pendingUsage.TotalTokens,
+			InputTokensDetails: responsesInputTokensDetails{
+				CachedTokens:     w.pendingUsage.CachedTokens,
+				CacheWriteTokens: w.pendingUsage.CachedWriteTokens,
+			},
+			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: w.pendingUsage.ReasoningTokens},
 		}
 		w.pendingUsage = nil
 	}
@@ -1148,6 +1199,7 @@ func (w *anthropicStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			TotalTokens:       ev.Usage.TotalTokens,
 			CachedTokens:      ev.Usage.CachedTokens,
 			CachedWriteTokens: ev.Usage.CachedWriteTokens,
+			ReasoningTokens:   ev.Usage.ReasoningTokens,
 		}
 		if w.finished && !w.deltaSent {
 			w.endBlock(&out)

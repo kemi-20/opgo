@@ -79,22 +79,22 @@ type Tool struct {
 
 // Request 规范化请求。
 type Request struct {
-	Model           string   `json:"model"`
-	Stream          bool     `json:"stream"`
-	MaxTokens       *int     `json:"max_tokens,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"top_p,omitempty"`
-	Stop            []string `json:"stop,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	ThinkingEnabled bool     `json:"thinking_enabled,omitempty"`
-	ThinkingBudget  int      `json:"thinking_budget,omitempty"`
-	System          []Block   `json:"system,omitempty"`
-	Messages        []Message `json:"messages,omitempty"`
-	Tools           []Tool    `json:"tools,omitempty"`
-	IncludeUsage    bool      `json:"include_usage,omitempty"`
-	Instructions    string    `json:"instructions,omitempty"`
-	ToolChoice      any       `json:"tool_choice,omitempty"`      // "auto" | "none" | "required" | {"type":"function","name":...}
-	ParallelToolCalls *bool   `json:"parallel_tool_calls,omitempty"`
+	Model             string    `json:"model"`
+	Stream            bool      `json:"stream"`
+	MaxTokens         *int      `json:"max_tokens,omitempty"`
+	Temperature       *float64  `json:"temperature,omitempty"`
+	TopP              *float64  `json:"top_p,omitempty"`
+	Stop              []string  `json:"stop,omitempty"`
+	ReasoningEffort   string    `json:"reasoning_effort,omitempty"`
+	ThinkingEnabled   bool      `json:"thinking_enabled,omitempty"`
+	ThinkingBudget    int       `json:"thinking_budget,omitempty"`
+	System            []Block   `json:"system,omitempty"`
+	Messages          []Message `json:"messages,omitempty"`
+	Tools             []Tool    `json:"tools,omitempty"`
+	IncludeUsage      bool      `json:"include_usage,omitempty"`
+	Instructions      string    `json:"instructions,omitempty"`
+	ToolChoice        any       `json:"tool_choice,omitempty"` // "auto" | "none" | "required" | {"type":"function","name":...}
+	ParallelToolCalls *bool     `json:"parallel_tool_calls,omitempty"`
 }
 
 // ---------- 规范化响应模型 ----------
@@ -123,6 +123,7 @@ type Usage struct {
 	TotalTokens       int64 `json:"total_tokens"`
 	CachedTokens      int64 `json:"cached_tokens"`
 	CachedWriteTokens int64 `json:"cached_write_tokens"`
+	ReasoningTokens   int64 `json:"reasoning_tokens"`
 }
 
 // Response 规范化响应（非流式）。
@@ -188,6 +189,21 @@ func parseTextOrBlocks(v any) []Block {
 					u = s
 				}
 				out = append(out, Block{Type: "image", ImageURL: u})
+			case "image":
+				// Anthropic 风格图片块：{type:image,source:{type:base64,...}}
+				u := ""
+				if src, ok := m["source"].(map[string]any); ok {
+					if st, _ := src["type"].(string); st == "base64" {
+						md, _ := src["media_type"].(string)
+						data, _ := src["data"].(string)
+						if md != "" && data != "" {
+							u = "data:" + md + ";base64," + data
+						}
+					}
+				}
+				if u != "" {
+					out = append(out, Block{Type: "image", ImageURL: u})
+				}
 			case "input_image":
 				// OpenAI Responses: image_url 是字符串；OpenAI chat 是 {url:...}
 				u := ""

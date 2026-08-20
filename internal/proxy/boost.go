@@ -12,11 +12,15 @@ import (
 // 同一周期（resetsAt 不变）可多次提额，limit 为当前档生效限额（美元）：
 // 第 1 次 = BoostPercent%×L，第 2 次 = BoostPercent%×第 1 次，依此类推。
 // level 为已提额次数（0 = 未提额），受 max_boost_times 限制。
-// 重置后 resetsAt 变化，状态自动清空并允许重新开始。
+// 重置后 resetsAt 变化，或配置热更新/原始限额变化时，状态自动清空并按
+// 当前配置重新判断是否提额。
 type boostState struct {
-	resetsAt int64   // 所属周期 resetsAt（Unix 秒）
-	limit    float64 // 当前档生效限额（美元）；0 = 未提额
-	level    int     // 已提额次数
+	resetsAt  int64          // 所属周期 resetsAt（Unix 秒）
+	limit     float64        // 当前档生效限额（美元）；0 = 未提额
+	level     int            // 已提额次数
+	revision  *config.Config // 创建状态时的配置快照；热更新后指针必然变化
+	policy    config.Boost   // 同指针被调用方修改时也能检测策略变化
+	baseLimit float64        // 用户/全局原始限额变化同样使旧提额失效
 }
 
 // boostTracker 智能提额状态（仅内存）。
@@ -29,15 +33,18 @@ func newBoostTracker() *boostTracker {
 	return &boostTracker{m: map[string]map[string]boostState{}}
 }
 
-// state 返回当前周期的提额后限额与已提额次数；未提额或跨周期返回 (0, 0, false)。
-// 跨周期时顺带清理旧周期状态，防止内存无限增长。
-func (t *boostTracker) state(uuid, period string, resetsAtUnix int64) (float64, int, bool) {
+// state 返回当前周期、当前配置快照下的提额限额与次数；未提额、跨周期、
+// 配置热更新或原始限额变化时返回 (0, 0, false) 并清理旧状态。
+func (t *boostTracker) state(uuid, period string, resetsAtUnix int64, c *config.Config, baseLimit float64) (float64, int, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	cur, ok := t.m[uuid][period]
-	if !ok || cur.resetsAt != resetsAtUnix || cur.limit <= 0 {
-		if ok && cur.resetsAt != resetsAtUnix {
+	if !ok || cur.resetsAt != resetsAtUnix || cur.limit <= 0 || cur.revision != c || cur.policy != c.Boost || cur.baseLimit != baseLimit {
+		if ok {
 			delete(t.m[uuid], period)
+			if len(t.m[uuid]) == 0 {
+				delete(t.m, uuid)
+			}
 		}
 		return 0, 0, false
 	}
@@ -45,13 +52,16 @@ func (t *boostTracker) state(uuid, period string, resetsAtUnix int64) (float64, 
 }
 
 // mark 记录当前周期提额到 newLimit，已提额次数记为 newLevel。
-func (t *boostTracker) mark(uuid, period string, resetsAtUnix int64, newLimit float64, newLevel int) {
+func (t *boostTracker) mark(uuid, period string, resetsAtUnix int64, newLimit float64, newLevel int, c *config.Config, baseLimit float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m[uuid] == nil {
 		t.m[uuid] = map[string]boostState{}
 	}
-	t.m[uuid][period] = boostState{resetsAt: resetsAtUnix, limit: newLimit, level: newLevel}
+	t.m[uuid][period] = boostState{
+		resetsAt: resetsAtUnix, limit: newLimit, level: newLevel,
+		revision: c, policy: c.Boost, baseLimit: baseLimit,
+	}
 }
 
 // maybeBoostLocked 在 uuid 锁内尝试智能提额（由 userLimitExceeded 调用，保证串行）。
@@ -75,9 +85,9 @@ func (p *Proxy) maybeBoostLocked(c *config.Config, uuid, period string, limits m
 	resetsAtUnix := capInfo.ResetsAt.Unix()
 	base := limit
 	level := 0
-	if cur, lv, ok := p.boost.state(uuid, period, resetsAtUnix); ok {
-		base = cur     // 多级提额：以当前档限额为基数
-		level = lv     // 已提额次数
+	if cur, lv, ok := p.boost.state(uuid, period, resetsAtUnix, c, limit); ok {
+		base = cur // 多级提额：以当前档限额为基数
+		level = lv // 已提额次数
 	}
 	// 最多提额次数限制
 	if b.MaxBoostTimes > 0 && level >= b.MaxBoostTimes {
@@ -111,7 +121,7 @@ func (p *Proxy) maybeBoostLocked(c *config.Config, uuid, period string, limits m
 		}
 	}
 	newLimit := base * float64(b.BoostPercent) / 100
-	p.boost.mark(uuid, period, resetsAtUnix, newLimit, level+1)
+	p.boost.mark(uuid, period, resetsAtUnix, newLimit, level+1, c, limit)
 	p.log.Info("智能提额",
 		"uuid", uuid,
 		"period", period,
@@ -130,7 +140,7 @@ func (p *Proxy) hardLimitFor(c *config.Config, uuid, period string, limit float6
 	if !c.Boost.Enabled {
 		return limit
 	}
-	if cur, _, ok := p.boost.state(uuid, period, resetsAtUnix); ok {
+	if cur, _, ok := p.boost.state(uuid, period, resetsAtUnix, c, limit); ok {
 		return cur
 	}
 	return limit * float64(c.Boost.BaseOveragePercent) / 100

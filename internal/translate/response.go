@@ -37,7 +37,8 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 			CompletionTokens    int64 `json:"completion_tokens"`
 			TotalTokens         int64 `json:"total_tokens"`
 			PromptTokensDetails *struct {
-				CachedTokens int64 `json:"cached_tokens"`
+				CachedTokens     int64 `json:"cached_tokens"`
+				CacheWriteTokens int64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -70,9 +71,10 @@ func parseOpenAICompletionsResponse(raw []byte) (*Response, error) {
 		resp.Usage.TotalTokens = obj.Usage.TotalTokens
 		if obj.Usage.PromptTokensDetails != nil {
 			resp.Usage.CachedTokens = obj.Usage.PromptTokensDetails.CachedTokens
+			resp.Usage.CachedWriteTokens = obj.Usage.PromptTokensDetails.CacheWriteTokens
 		}
 		if obj.Usage.CompletionTokensDetails != nil {
-			resp.Usage.CachedWriteTokens = obj.Usage.CompletionTokensDetails.ReasoningTokens
+			resp.Usage.ReasoningTokens = obj.Usage.CompletionTokensDetails.ReasoningTokens
 		}
 	}
 	return resp, nil
@@ -123,7 +125,8 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 			OutputTokens       int64 `json:"output_tokens"`
 			TotalTokens        int64 `json:"total_tokens"`
 			InputTokensDetails *struct {
-				CachedTokens int64 `json:"cached_tokens"`
+				CachedTokens     int64 `json:"cached_tokens"`
+				CacheWriteTokens int64 `json:"cache_write_tokens"`
 			} `json:"input_tokens_details"`
 			OutputTokensDetails *struct {
 				ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -185,9 +188,10 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 		resp.Usage.TotalTokens = obj.Usage.TotalTokens
 		if obj.Usage.InputTokensDetails != nil {
 			resp.Usage.CachedTokens = obj.Usage.InputTokensDetails.CachedTokens
+			resp.Usage.CachedWriteTokens = obj.Usage.InputTokensDetails.CacheWriteTokens
 		}
 		if obj.Usage.OutputTokensDetails != nil {
-			resp.Usage.CachedWriteTokens = obj.Usage.OutputTokensDetails.ReasoningTokens
+			resp.Usage.ReasoningTokens = obj.Usage.OutputTokensDetails.ReasoningTokens
 		}
 	}
 	return resp, nil
@@ -311,7 +315,13 @@ func buildOpenAICompletionsResponse(resp *Response) ([]byte, error) {
 			"total_tokens":      resp.Usage.TotalTokens,
 		}
 		if resp.Usage.CachedTokens > 0 || resp.Usage.CachedWriteTokens > 0 {
-			u["prompt_tokens_details"] = map[string]any{"cached_tokens": resp.Usage.CachedTokens}
+			u["prompt_tokens_details"] = map[string]any{
+				"cached_tokens":      resp.Usage.CachedTokens,
+				"cache_write_tokens": resp.Usage.CachedWriteTokens,
+			}
+		}
+		if resp.Usage.ReasoningTokens > 0 {
+			u["completion_tokens_details"] = map[string]any{"reasoning_tokens": resp.Usage.ReasoningTokens}
 		}
 		out["usage"] = u
 	}
@@ -388,11 +398,14 @@ func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, er
 	var usage any
 	if hasUsage {
 		usage = responsesUsageObj{
-			InputTokens:         resp.Usage.PromptTokens,
-			OutputTokens:        resp.Usage.CompletionTokens,
-			TotalTokens:         resp.Usage.TotalTokens,
-			InputTokensDetails:  responsesInputTokensDetails{CachedTokens: resp.Usage.CachedTokens},
-			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: resp.Usage.CachedWriteTokens},
+			InputTokens:  resp.Usage.PromptTokens,
+			OutputTokens: resp.Usage.CompletionTokens,
+			TotalTokens:  resp.Usage.TotalTokens,
+			InputTokensDetails: responsesInputTokensDetails{
+				CachedTokens:     resp.Usage.CachedTokens,
+				CacheWriteTokens: resp.Usage.CachedWriteTokens,
+			},
+			OutputTokensDetails: responsesOutputTokensDetails{ReasoningTokens: resp.Usage.ReasoningTokens},
 		}
 	}
 	temp := any(1)

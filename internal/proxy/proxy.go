@@ -258,6 +258,16 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			body = nb
 		}
 	}
+	// Muse 原生 Responses 接口支持 web_search，但会拒绝 OpenCodex 附加的
+	// search_content_types。该兼容处理是内置且强制的，并由模型名、实际发往
+	// 上游的协议、工具类型和字段四重约束，不影响任何其他模型或字段。
+	upstreamFormat := srcFormat
+	if transformEnabled {
+		upstreamFormat = dstFormat
+	}
+	if nb, changed := sanitizeMuseResponsesTools(model, string(upstreamFormat), body); changed {
+		body = nb
+	}
 	// 客户端可用标准 OpenAI 路径（/v1/chat/completions 等）：去掉 /v1 前缀后拼接到上游
 	upstream := c.UpstreamBase + upstreamPath
 	if r.URL.RawQuery != "" {
@@ -313,6 +323,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && model != "" {
 		if u, ok2 := meter.ParseBodyUsage(respBody); ok2 {
 			p.recordUsage(user, key, model, r.URL.Path, u, price, now)
+		} else {
+			p.log.Warn("上游成功响应缺少可解析 usage，本次未计费",
+				"uuid", user.UUID, "model", model, "endpoint", r.URL.Path, "stream", false)
 		}
 	}
 	// 仅 2xx 响应做协议转换；错误响应原样透传（保留上游错误语义与状态码）
@@ -392,6 +405,9 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 			break
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		p.log.Warn("读取上游流失败", "err", err, "uuid", user.UUID, "model", model, "endpoint", r.URL.Path)
+	}
 	// 循环结束（done 或 EOF）：统一补齐一次终止事件（[DONE] / message_stop / ping）。
 	// Feed(done) 后 writer 不再自行输出终止事件，因此 Close() 只调用一次不会重复。
 	if conv != nil {
@@ -399,6 +415,9 @@ func (p *Proxy) streamCopy(w http.ResponseWriter, r *http.Request, resp *http.Re
 	}
 	if got && model != "" {
 		p.recordUsage(user, key, model, r.URL.Path, acc, price, now)
+	} else if model != "" {
+		p.log.Warn("上游成功流缺少可解析 usage，本次未计费",
+			"uuid", user.UUID, "model", model, "endpoint", r.URL.Path, "stream", true)
 	}
 }
 
@@ -410,8 +429,13 @@ func mergeUsage(acc *meter.Usage, u meter.Usage) {
 		acc.CachedWriteTokens = u.CachedWriteTokens
 	}
 	acc.CompletionTokens += u.CompletionTokens
+	acc.ReasoningTokens += u.ReasoningTokens
 	if u.TotalTokens > 0 {
 		acc.TotalTokens = u.TotalTokens
+	} else if acc.PromptTokens > 0 || acc.CompletionTokens > 0 {
+		// Anthropic 流把输入与输出 usage 分开发送，message_delta 没有
+		// total_tokens；合并后自行补全，避免数据库只记录输入总数。
+		acc.TotalTokens = acc.PromptTokens + acc.CompletionTokens
 	}
 }
 
@@ -590,7 +614,7 @@ func (p *Proxy) windowsReport(uuid string, limits map[string]float64, snap *bala
 				pct := wi.Used / wi.Limit * 100
 				wi.Percent = &pct
 				if c.Boost.Enabled {
-					if cur, _, ok := p.boost.state(uuid, period.Name, capInfo.ResetsAt.Unix()); ok {
+					if cur, _, ok := p.boost.state(uuid, period.Name, capInfo.ResetsAt.Unix(), c, wi.Limit); ok {
 						wi.Boosted = true
 						wi.BoostLimit = cur
 					}

@@ -266,13 +266,32 @@ func TestToolResultTextPreserved(t *testing.T) {
 	_ = json.Unmarshal(out, &obj)
 	msgs, _ := obj["messages"].([]any)
 	var toolContent, userText string
+	var sawImage bool
 	for _, m := range msgs {
 		mm := m.(map[string]any)
 		if mm["role"] == "tool" {
 			toolContent, _ = mm["content"].(string)
 		}
-		if mm["role"] == "user" && strings.Contains(mm["content"].(string), "essay") {
-			userText, _ = mm["content"].(string)
+		if mm["role"] != "user" {
+			continue
+		}
+		switch content := mm["content"].(type) {
+		case string:
+			if strings.Contains(content, "essay") {
+				userText = content
+			}
+		case []any:
+			for _, item := range content {
+				part, _ := item.(map[string]any)
+				switch part["type"] {
+				case "text":
+					if text, _ := part["text"].(string); strings.Contains(text, "essay") {
+						userText = text
+					}
+				case "image_url":
+					sawImage = true
+				}
+			}
 		}
 	}
 	if toolContent != "hi" {
@@ -280,6 +299,9 @@ func TestToolResultTextPreserved(t *testing.T) {
 	}
 	if !strings.Contains(userText, "Now write the essay.") {
 		t.Errorf("同消息普通文本被丢弃: %q", userText)
+	}
+	if !sawImage {
+		t.Error("工具结果图片应移动到后续 user 多模态消息，而不是丢失或放进 role=tool")
 	}
 }
 
