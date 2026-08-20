@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // ---------- OpenAI chat/completions 请求解析 ----------
@@ -207,6 +208,21 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 	}
 	var input any
 	_ = json.Unmarshal(obj.Input, &input)
+	// Responses 把同一次 assistant 输出拆成 reasoning/message/function_call 等多个顶层项。
+	// 转为 Chat Completions 时必须把连续的 assistant 项重新合并成一条消息；否则会形成
+	// assistant(reasoning) -> assistant(text) -> assistant(tool_calls) 的非法历史。部分模型
+	// 会把中间的文本消息误判为该轮已经结束，表现为“提示即将调用工具后直接停止”。
+	appendAssistantBlocks := func(blocks ...Block) {
+		if len(blocks) == 0 {
+			return
+		}
+		if n := len(req.Messages); n > 0 && req.Messages[n-1].Role == "assistant" {
+			req.Messages[n-1].Content = append(req.Messages[n-1].Content, blocks...)
+			req.Messages[n-1].Text = blocksText(req.Messages[n-1].Content)
+			return
+		}
+		req.Messages = append(req.Messages, Message{Role: "assistant", Content: append([]Block(nil), blocks...), Text: blocksText(blocks)})
+	}
 	switch t := input.(type) {
 	case string:
 		if t != "" {
@@ -233,22 +249,26 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 			if role == "" {
 				switch m["type"] {
 				case "reasoning":
-					// 顶层 reasoning 项 → assistant 思考块（历史中的思考内容）。
-					var summary string
-					if sum, ok := m["summary"].([]any); ok && len(sum) > 0 {
-						if first, ok := sum[0].(map[string]any); ok {
-							summary, _ = first["text"].(string)
-						}
-					}
-					if summary == "" {
-						if c, ok := m["content"].([]any); ok && len(c) > 0 {
-							if first, ok := c[0].(map[string]any); ok {
-								summary, _ = first["text"].(string)
+					// 顶层 reasoning 项 → 当前 assistant 轮的思考块。保留全部分片，
+					// 而不是只取 summary/content 的第一项。
+					var parts []string
+					for _, field := range []string{"summary", "content"} {
+						if arr, ok := m[field].([]any); ok {
+							for _, rawPart := range arr {
+								if part, ok := rawPart.(map[string]any); ok {
+									if text, _ := part["text"].(string); text != "" {
+										parts = append(parts, text)
+									}
+								}
 							}
 						}
+						if len(parts) > 0 {
+							break
+						}
 					}
+					summary := strings.Join(parts, "")
 					if summary != "" {
-						req.Messages = append(req.Messages, Message{Role: "assistant", Content: []Block{{Type: "thinking", Thinking: summary}}})
+						appendAssistantBlocks(Block{Type: "thinking", Thinking: summary})
 					}
 
 				case "function_call":
@@ -266,12 +286,9 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 						argsRaw, _ = json.Marshal(m["arguments"])
 					}
 					block := Block{Type: "tool_use", ToolUseID: callID, Name: name, Input: argsRaw}
-					// 连续的工具调用合并到同一条 assistant 消息（并行调用）。
-					if n := len(req.Messages); n > 0 && req.Messages[n-1].Role == "assistant" && allToolUse(req.Messages[n-1].Content) {
-						req.Messages[n-1].Content = append(req.Messages[n-1].Content, block)
-					} else {
-						req.Messages = append(req.Messages, Message{Role: "assistant", Content: []Block{block}})
-					}
+					// function_call 属于前面的 reasoning/message 同一轮；即使前一项含文本，
+					// 也必须合并，生成 content + reasoning_content + tool_calls 的单条消息。
+					appendAssistantBlocks(block)
 				case "function_call_output":
 					callID, _ := m["call_id"].(string)
 					if s, ok := m["output"].(string); ok {
@@ -292,7 +309,11 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 				msg.Content = parseTextOrBlocks(c)
 			}
 			msg.Text = blocksText(msg.Content)
-			req.Messages = append(req.Messages, msg)
+			if role == "assistant" {
+				appendAssistantBlocks(msg.Content...)
+			} else {
+				req.Messages = append(req.Messages, msg)
+			}
 		}
 	}
 	for _, t := range obj.Tools {
@@ -301,19 +322,6 @@ func parseOpenAIResponsesRequest(raw []byte) (*Request, error) {
 		}
 	}
 	return req, nil
-}
-
-// allToolUse 判断消息内容是否全部为工具调用块（用于合并连续 function_call 裸项）。
-func allToolUse(blocks []Block) bool {
-	if len(blocks) == 0 {
-		return false
-	}
-	for _, b := range blocks {
-		if b.Type != "tool_use" {
-			return false
-		}
-	}
-	return true
 }
 
 // ---------- Anthropic 请求解析 ----------

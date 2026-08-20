@@ -6,6 +6,75 @@ import (
 	"testing"
 )
 
+// TestResponsesAssistantTurnMergedLikeCLIProxyAPI 验证 Responses 的同轮输出不会被
+// 拆成多个连续 assistant 消息。Codex 会把 reasoning、可见进度文本和 function_call
+// 分成顶层项；Chat Completions 历史必须还原为一条 assistant 消息。
+func TestResponsesAssistantTurnMergedLikeCLIProxyAPI(t *testing.T) {
+	raw := []byte(`{
+		"model":"mimo-v2.5","stream":true,
+		"reasoning":{"effort":"max"},
+		"input":[
+			{"role":"user","content":[{"type":"input_text","text":"依次调用三个工具"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"先调用第一个。"},{"type":"summary_text","text":"然后继续。"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"现在调用第一个工具。"}]},
+			{"type":"function_call","call_id":"call_1","name":"exec","arguments":"{\"input\":\"one\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"one ok"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"第一个成功。"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"现在调用第二个工具。"}]},
+			{"type":"function_call","call_id":"call_2","name":"exec","arguments":"{\"input\":\"two\"}"},
+			{"type":"function_call_output","call_id":"call_2","output":"two ok"}
+		],
+		"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]
+	}`)
+	out, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAICompletions, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCallID       string `json:"tool_call_id"`
+			ToolCalls        []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if len(obj.Messages) != 5 {
+		t.Fatalf("messages = %d, want user/assistant/tool/assistant/tool:\n%s", len(obj.Messages), out)
+	}
+	for _, index := range []int{1, 3} {
+		message := obj.Messages[index]
+		if message.Role != "assistant" || message.Content == "" || message.ReasoningContent == "" || len(message.ToolCalls) != 1 {
+			t.Fatalf("messages[%d] 未合并 reasoning+text+tool_calls: %+v\n%s", index, message, out)
+		}
+	}
+	if obj.Messages[1].ReasoningContent != "先调用第一个。然后继续。" {
+		t.Fatalf("多段 reasoning 未完整保留: %q", obj.Messages[1].ReasoningContent)
+	}
+	if obj.Messages[2].Role != "tool" || obj.Messages[2].ToolCallID != "call_1" || obj.Messages[4].ToolCallID != "call_2" {
+		t.Fatalf("工具结果配对错误: %+v", obj.Messages)
+	}
+}
+
+func TestHy3ReasoningEffortNormalization(t *testing.T) {
+	for input, want := range map[string]string{
+		"none": "no_think", "minimal": "no_think", "no_think": "no_think",
+		"low": "low", "medium": "high", "high": "high", "xhigh": "high", "max": "high",
+	} {
+		if got := normalizeCompletionsReasoningEffort("hy3", input); got != want {
+			t.Errorf("hy3 %q = %q, want %q", input, got, want)
+		}
+	}
+	if got := normalizeCompletionsReasoningEffort("mimo-v2.5", "max"); got != "max" {
+		t.Errorf("非 hy3 不应改写: %q", got)
+	}
+}
+
 // TestToolChoiceParallelForwarding 验证 tool_choice / parallel_tool_calls 在双向转换中不再丢失。
 func TestToolChoiceParallelForwarding(t *testing.T) {
 	// Responses -> completions

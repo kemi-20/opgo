@@ -141,16 +141,15 @@ func TestParseResponsesTopLevelReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// user / assistant(thinking) / assistant(tool_use)
-	if len(req.Messages) != 3 {
-		t.Fatalf("messages = %d, want 3: %+v", len(req.Messages), req.Messages)
+	// reasoning 与 function_call 属于同一 assistant 轮，必须合并。
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2: %+v", len(req.Messages), req.Messages)
 	}
 	m1 := req.Messages[1]
-	if m1.Role != "assistant" || len(m1.Content) != 1 || m1.Content[0].Type != "thinking" || m1.Content[0].Thinking != "think hard" {
-		t.Fatalf("messages[1] = %+v, want assistant thinking", m1)
+	if m1.Role != "assistant" || len(m1.Content) != 2 || m1.Content[0].Type != "thinking" || m1.Content[0].Thinking != "think hard" {
+		t.Fatalf("messages[1] = %+v, want merged assistant thinking+tool_use", m1)
 	}
-	m2 := req.Messages[2]
-	if m2.Role != "assistant" || len(m2.Content) != 1 || m2.Content[0].Type != "tool_use" {
-		t.Fatalf("messages[2] = %+v, want assistant tool_use", m2)
+	if m1.Content[1].Type != "tool_use" || m1.Content[1].ToolUseID != "call_1" {
+		t.Fatalf("messages[1] tool = %+v, want call_1", m1.Content[1])
 	}
 }

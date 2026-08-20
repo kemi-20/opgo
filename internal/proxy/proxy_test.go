@@ -40,7 +40,8 @@ func testConfigJSON(upstream string) string {
 			"deepseek-v4-pro": {"input_per_million": 1.74, "output_per_million": 3.48, "cached_read_per_million": 0.0145, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000},
 			"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
 			"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000},
-			"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"}
+			"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"},
+			"muse-spark-1.2-contributor": {"input_per_million": 0.10, "output_per_million": 0.20, "cached_read_per_million": 0.002, "cached_write_per_million": 0, "context_length": 1048576, "max_output_tokens": 131072, "modality": "text+image+audio->text"}
 		},
 		"users": [
 			{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-user-1-key-1111111111"]},
@@ -388,22 +389,24 @@ func TestModelsList(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 5 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" || obj.Data[4].ID != "hy3" {
+	if len(obj.Data) != 6 || obj.Data[0].ID != "deepseek-v4-flash" || obj.Data[1].ID != "deepseek-v4-pro" || obj.Data[2].ID != "mimo-v2.5" || obj.Data[3].ID != "gpt-5.6-luna" || obj.Data[4].ID != "hy3" || obj.Data[5].ID != "muse-spark-1.2-contributor" {
 		t.Errorf("models = %+v", obj.Data)
 	}
 	wantCtx := map[string]int64{
-		"deepseek-v4-flash": 1000000,
-		"deepseek-v4-pro":   1000000,
-		"mimo-v2.5":         1000000,
-		"gpt-5.6-luna":      1050000,
-		"hy3":               256000,
+		"deepseek-v4-flash":          1000000,
+		"deepseek-v4-pro":            1000000,
+		"mimo-v2.5":                  1000000,
+		"gpt-5.6-luna":               1050000,
+		"hy3":                        256000,
+		"muse-spark-1.2-contributor": 1048576,
 	}
 	wantMax := map[string]int64{
-		"deepseek-v4-flash": 384000,
-		"deepseek-v4-pro":   384000,
-		"mimo-v2.5":         128000,
-		"gpt-5.6-luna":      128000,
-		"hy3":               64000,
+		"deepseek-v4-flash":          384000,
+		"deepseek-v4-pro":            384000,
+		"mimo-v2.5":                  128000,
+		"gpt-5.6-luna":               128000,
+		"hy3":                        64000,
+		"muse-spark-1.2-contributor": 131072,
 	}
 	for i, m := range obj.Data {
 		if w, ok := wantCtx[m.ID]; !ok || m.ContextLength != w {
@@ -412,16 +415,30 @@ func TestModelsList(t *testing.T) {
 		if w, ok := wantMax[m.ID]; !ok || m.MaxOutputTokens != w {
 			t.Errorf("models[%d] %s max_output_tokens = %d，应 %d", i, m.ID, m.MaxOutputTokens, w)
 		}
-		// 未配置 modality 默认 text->text
-		if m.Architecture == nil || m.Architecture.Modality != "text->text" {
-			t.Errorf("models[%d] architecture = %+v，应默认 text->text", i, m.Architecture)
+		// 未配置 modality 默认 text->text；muse 为 text+image+audio->text
+		wantModality := "text->text"
+		if m.ID == "muse-spark-1.2-contributor" {
+			wantModality = "text+image+audio->text"
+		}
+		if m.Architecture == nil || m.Architecture.Modality != wantModality {
+			t.Errorf("models[%d] %s architecture = %+v，应 %s", i, m.ID, m.Architecture, wantModality)
 		}
 		if m.Architecture != nil {
-			if len(m.Architecture.InputModalities) != 1 || m.Architecture.InputModalities[0] != "text" {
-				t.Errorf("models[%d] input_modalities = %v", i, m.Architecture.InputModalities)
+			wantIn := []string{"text"}
+			if m.ID == "muse-spark-1.2-contributor" {
+				wantIn = []string{"text", "image", "audio"}
+			}
+			if len(m.Architecture.InputModalities) != len(wantIn) {
+				t.Errorf("models[%d] %s input_modalities = %v", i, m.ID, m.Architecture.InputModalities)
+			} else {
+				for j := range wantIn {
+					if m.Architecture.InputModalities[j] != wantIn[j] {
+						t.Errorf("models[%d] %s input_modalities[%d] = %q", i, m.ID, j, m.Architecture.InputModalities[j])
+					}
+				}
 			}
 			if len(m.Architecture.OutputModalities) != 1 || m.Architecture.OutputModalities[0] != "text" {
-				t.Errorf("models[%d] output_modalities = %v", i, m.Architecture.OutputModalities)
+				t.Errorf("models[%d] %s output_modalities = %v", i, m.ID, m.Architecture.OutputModalities)
 			}
 		}
 	}
@@ -789,7 +806,7 @@ func TestModelsListOmitsContextLengthWhenUnset(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(obj.Data) != 5 {
+	if len(obj.Data) != 6 {
 		t.Errorf("models = %+v", obj.Data)
 	}
 }
@@ -1142,6 +1159,7 @@ func TestBoostMultipleLevels(t *testing.T) {
 		t.Fatalf("8.4 status = %d: %s, want 429（超第三级硬卡）", st, body)
 	}
 }
+
 // max_boost_times=1：每周期最多提额一次，提到 3.6 后即使再次达到 90%×3.6 也不再提额，
 // 超过 3.6 即 429；重置后可重新提额一次。
 func TestBoostMaxTimesLimit(t *testing.T) {
@@ -1183,6 +1201,7 @@ func TestBoostMaxTimesLimit(t *testing.T) {
 		t.Fatalf("3.61 status = %d: %s, want 429（超过 max_boost_times 后的硬卡）", st, body)
 	}
 }
+
 // ---- 最小干预透传测试 ----
 
 // TestForwardPassThroughHeaders 验证：除认证外，UA 与自定义头原样透传到上游，
@@ -1445,7 +1464,6 @@ func TestTransformStreamUsageAfterClientDisconnect(t *testing.T) {
 		t.Errorf("sum = %d, want 2663", sum)
 	}
 }
-
 
 // TestResponsesPassthroughNoStreamOptionsInjection 验证：/responses 透传不再注入
 // chat 专用的 stream_options（此前会把该字段塞进 Responses 请求体，客户端若同时

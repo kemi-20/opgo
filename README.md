@@ -4,7 +4,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3 定价）
+- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.2-contributor 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
 - 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
@@ -133,6 +133,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | mimo-v2.5 | `text+image+audio+video->text` |
 | gpt-5.6-luna | `text+image->text` |
 | hy3 | `text->text`（纯文本） |
+| muse-spark-1.2-contributor | `text+image+audio->text` |
 
 `GET /v1/models` 会把 modality 自动拆为三个字段返回：
 
@@ -181,6 +182,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | mimo-v2.5 | `openai_completions` | 上游只有 chat/completions 完整（Responses 不稳定、messages 无思考），统一转 completions |
 | hy3 | `openai_completions` | 统一转 chat/completions 发上游（与 mimo 同策略） |
 | gpt-5.6-luna | `openai_responses` | 上游原生支持 Responses（含 web_search），统一转 responses |
+| muse-spark-1.2-contributor | （留空透传） | 上游官方规范端点为 Responses（/v1/responses），原生三端点路由均在；Contributor 模型需在 Coding Plan workspace 显式开启数据收集 opt-in，未开启时上游返回 403 DataPolicyError |
 
 客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。
 

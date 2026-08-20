@@ -29,7 +29,7 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 		}
 	}
 	if req.ReasoningEffort != "" {
-		out["reasoning_effort"] = req.ReasoningEffort
+		out["reasoning_effort"] = normalizeCompletionsReasoningEffort(req.Model, req.ReasoningEffort)
 	}
 	if req.ParallelToolCalls != nil {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
@@ -155,6 +155,23 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 		out["stream_options"] = map[string]any{"include_usage": true}
 	}
 	return json.Marshal(out)
+}
+
+// normalizeCompletionsReasoningEffort 处理上游模型的枚举差异。
+// hy3 仅接受 no_think/low/high，而 Codex 可发送 medium/xhigh/max/none/minimal。
+func normalizeCompletionsReasoningEffort(model, effort string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if model != "hy3" {
+		return effort
+	}
+	switch effort {
+	case "none", "minimal", "no_think":
+		return "no_think"
+	case "low":
+		return "low"
+	default:
+		return "high"
+	}
 }
 
 func hasToolResultBlock(blocks []Block) bool {

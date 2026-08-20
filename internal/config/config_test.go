@@ -22,7 +22,8 @@ const exampleJSON = `{
 		"deepseek-v4-pro": {"input_per_million": 1.32, "output_per_million": 3.96, "cached_read_per_million": 0.044, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 384000, "tag": "高峰期2x消耗", "peak": {"enabled": true, "multiplier": 2, "windows": [["01:00", "04:00"], ["06:00", "10:00"]]}},
 		"mimo-v2.5": {"input_per_million": 0.14, "output_per_million": 0.28, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 1000000, "max_output_tokens": 128000},
 		"gpt-5.6-luna": {"input_per_million": 1.60, "output_per_million": 7.20, "cached_read_per_million": 0.16, "cached_write_per_million": 2.00, "context_length": 1050000, "max_output_tokens": 128000},
-		"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"}
+		"hy3": {"input_per_million": 0.14, "output_per_million": 0.58, "cached_read_per_million": 0.0028, "cached_write_per_million": 0, "context_length": 256000, "max_output_tokens": 64000, "transformation": "openai_completions"},
+		"muse-spark-1.2-contributor": {"input_per_million": 0.10, "output_per_million": 0.20, "cached_read_per_million": 0.002, "cached_write_per_million": 0, "context_length": 1048576, "max_output_tokens": 131072, "modality": "text+image+audio->text"}
 	},
 	"users": [
 		{"uuid": "uuid-1", "remark": "张三", "keys": ["sk-u1", "sk-u1b"]},
@@ -45,7 +46,7 @@ func TestParseExample(t *testing.T) {
 	if c.UpstreamBase != "https://PROVIDER_HOST/v1" {
 		t.Errorf("upstream = %q", c.UpstreamBase)
 	}
-	if got := c.ModelNames(); len(got) != 5 || got[0] != "deepseek-v4-flash" || got[1] != "deepseek-v4-pro" || got[2] != "mimo-v2.5" || got[3] != "gpt-5.6-luna" || got[4] != "hy3" {
+	if got := c.ModelNames(); len(got) != 6 || got[0] != "deepseek-v4-flash" || got[1] != "deepseek-v4-pro" || got[2] != "mimo-v2.5" || got[3] != "gpt-5.6-luna" || got[4] != "hy3" || got[5] != "muse-spark-1.2-contributor" {
 		t.Errorf("model order = %v", got)
 	}
 	if _, ok := c.Price("mimo-v2.5"); !ok {
@@ -67,6 +68,15 @@ func TestParseExample(t *testing.T) {
 		t.Error("hy3 应有价格")
 	} else if hp.InputPerMillion != 0.14 || hp.OutputPerMillion != 0.58 || hp.CachedReadPerMillion != 0.0028 || hp.CachedWritePerMillion != 0 {
 		t.Errorf("hy3 价格 = %+v，应 0.14/0.58/0.0028/0（models.dev）", hp)
+	}
+	if mp2, ok := c.Price("muse-spark-1.2-contributor"); !ok {
+		t.Error("muse-spark-1.2-contributor 应有价格")
+	} else if mp2.InputPerMillion != 0.10 || mp2.OutputPerMillion != 0.20 || mp2.CachedReadPerMillion != 0.002 || mp2.CachedWritePerMillion != 0 {
+		t.Errorf("muse 价格 = %+v，应 0.10/0.20/0.002/0（models.dev）", mp2)
+	} else if mp2.ContextLength != 1048576 || mp2.MaxOutputTokens != 131072 {
+		t.Errorf("muse context/max = %d/%d，应 1048576/131072", mp2.ContextLength, mp2.MaxOutputTokens)
+	} else if mp2.Modality != "text+image+audio->text" {
+		t.Errorf("muse modality = %q，应 text+image+audio->text", mp2.Modality)
 	}
 	if _, ok := c.Price("nope"); ok {
 		t.Error("nope 不应有价格")
@@ -216,7 +226,7 @@ func TestRawPricingPreservesPrecision(t *testing.T) {
 	if list[0].Price.Tag != "高峰期2x消耗" {
 		t.Errorf("RawPricing tag = %q，应保留原始 tag", list[0].Price.Tag)
 	}
-	if len(list) != 5 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "deepseek-v4-pro" || list[2].Model != "mimo-v2.5" || list[3].Model != "gpt-5.6-luna" || list[4].Model != "hy3" {
+	if len(list) != 6 || list[0].Model != "deepseek-v4-flash" || list[1].Model != "deepseek-v4-pro" || list[2].Model != "mimo-v2.5" || list[3].Model != "gpt-5.6-luna" || list[4].Model != "hy3" || list[5].Model != "muse-spark-1.2-contributor" {
 		t.Fatalf("RawPricing 顺序 = %+v，应保持 config 书写顺序", list)
 	}
 	p := list[0].Price
@@ -247,7 +257,7 @@ func TestContextLengthOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "gpt-5.6-luna", "hy3"} {
+	for _, name := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "gpt-5.6-luna", "hy3", "muse-spark-1.2-contributor"} {
 		p, ok := c.Price(name)
 		if !ok {
 			t.Fatalf("%s 应有价格", name)
