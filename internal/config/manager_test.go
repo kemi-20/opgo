@@ -7,9 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type lockedLogBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 func TestManagerReloadValid(t *testing.T) {
 	dir := t.TempDir()
@@ -112,6 +130,49 @@ func TestManagerWatch(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if mgr.Get().UserByKey("sk-watch-new") == nil {
 		t.Error("非法配置不应替换当前配置")
+	}
+}
+
+func TestManagerWatchDetectsDeletionAndReloadsRestoredFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(exampleJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := Parse([]byte(exampleJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs lockedLogBuffer
+	mgr := NewManager(initial, path, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Watch(ctx, 20*time.Millisecond)
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "已删除") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "已删除") {
+		t.Fatalf("删除配置后应告警，logs=%s", logs.String())
+	}
+	if mgr.Get() != initial {
+		t.Fatal("配置删除期间必须保留最后有效快照")
+	}
+
+	restored := strings.Replace(exampleJSON, "sk-u2", "sk-restored", 1)
+	if err := os.WriteFile(path, []byte(restored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && mgr.Get().UserByKey("sk-restored") == nil {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if mgr.Get().UserByKey("sk-restored") == nil {
+		t.Fatal("配置文件恢复后应自动重新载入")
 	}
 }
 

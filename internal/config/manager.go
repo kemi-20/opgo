@@ -66,6 +66,7 @@ func (m *Manager) Watch(ctx context.Context, interval time.Duration) {
 		interval = time.Second
 	}
 	lastHash := fileHash(m.path)
+	lastExists := lastHash != ""
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -75,7 +76,22 @@ func (m *Manager) Watch(ctx context.Context, interval time.Duration) {
 				return
 			case <-t.C:
 				h := fileHash(m.path)
-				if h == "" || h == lastHash {
+				if h == "" {
+					if lastExists {
+						m.log.Warn("配置文件不可读取或已删除，保留内存中的最后有效配置", "config", m.path)
+					}
+					lastExists = false
+					continue
+				}
+				if !lastExists {
+					// 文件恢复后即使内容 hash 与删除前相同，也重新读取校验，
+					// 让恢复动作可观测并确认磁盘配置仍然有效。
+					lastExists = true
+					lastHash = h
+					_ = m.Reload()
+					continue
+				}
+				if h == lastHash {
 					continue
 				}
 				lastHash = h

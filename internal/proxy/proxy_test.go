@@ -308,6 +308,53 @@ func TestUnknownModel403(t *testing.T) {
 	}
 }
 
+func TestGenerationEndpointsRejectMissingOrInvalidModel(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"chat missing", "/v1/chat/completions", `{"messages":[]}`},
+		{"responses null", "/v1/responses", `{"model":null,"input":"hi"}`},
+		{"messages empty", "/v1/messages", `{"model":"","messages":[]}`},
+		{"invalid json", "/v1/chat/completions", `{"model":`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fu := &fakeUpstream{}
+			up := newFakeServer(fu)
+			defer up.Close()
+			// 即使余额从未同步，非法生成请求也应先以 400 拒绝，且绝不触达上游。
+			p, _ := newTestProxy(t, up.URL, &noBalance{}, nil)
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+
+			status, body, _ := doReq(t, srv, http.MethodPost, tc.path, testUser1, tc.body)
+			if status != http.StatusBadRequest || !strings.Contains(body, "model") {
+				t.Fatalf("status=%d body=%s, want 400 model error", status, body)
+			}
+			if got := fu.path(); got != "" {
+				t.Fatalf("非法请求不应到达上游，path=%q", got)
+			}
+		})
+	}
+}
+
+func TestNonGenerationEndpointMayOmitModel(t *testing.T) {
+	// 非生成扩展端点仍保持通用代理能力；只有三种已识别的生成协议强制 model。
+	fu := &fakeUpstream{}
+	up := newFakeServer(fu)
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &noBalance{}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	status, _, _ := doReq(t, srv, http.MethodPost, "/v1/custom", testUser1, `{}`)
+	if status != http.StatusOK || fu.path() != "/custom" {
+		t.Fatalf("通用端点透传失败: status=%d path=%q", status, fu.path())
+	}
+}
+
 func TestUserLimit429(t *testing.T) {
 	up := newFakeServer(&fakeUpstream{})
 	defer up.Close()

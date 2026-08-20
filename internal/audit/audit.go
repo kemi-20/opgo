@@ -79,10 +79,12 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	var mu sync.Mutex
 	var gotAuth string
 	var gotPath string
+	var gotCalls int
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
+		gotCalls++
 		mu.Unlock()
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -281,6 +283,23 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 			return fmt.Errorf("状态 %d", status)
 		}
 		return assertNoKeys("/403", body, hdr)
+	})
+	check("缺少 model → 400 且不转发无泄露", func() error {
+		mu.Lock()
+		callsBefore := gotCalls
+		mu.Unlock()
+		status, body, hdr := req(client, http.MethodPost, srv1.URL+"/v1/chat/completions", "Bearer "+userKey,
+			"{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+		if status != http.StatusBadRequest {
+			return fmt.Errorf("状态 %d", status)
+		}
+		mu.Lock()
+		callsAfter := gotCalls
+		mu.Unlock()
+		if callsAfter != callsBefore {
+			return fmt.Errorf("缺少 model 的请求触达上游（调用数 %d → %d）", callsBefore, callsAfter)
+		}
+		return assertNoKeys("/400-model", body, hdr)
 	})
 	check("余额未同步 → 503 无泄露", func() error {
 		status, body, hdr := req(client, http.MethodPost, srv2.URL+"/v1/chat/completions", "Bearer "+userKey,

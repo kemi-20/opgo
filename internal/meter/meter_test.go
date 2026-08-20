@@ -141,8 +141,19 @@ func TestParseSSEUsageAnthropicStart(t *testing.T) {
 func TestParseSSEUsageAnthropicDelta(t *testing.T) {
 	line := []byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`)
 	u, ok := ParseSSEUsage(line)
-	if !ok || u.CompletionTokens != 20 {
+	if !ok || u.CompletionTokens != 20 || u.TotalTokens != 0 {
 		t.Errorf("usage = %+v, ok=%v", u, ok)
+	}
+}
+
+func TestParseSSEUsageAnthropicDeltaPreservesAllProvidedFields(t *testing.T) {
+	line := []byte(`data: {"type":"message_delta","usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"total_tokens":19}}`)
+	u, ok := ParseSSEUsage(line)
+	if !ok {
+		t.Fatal("message_delta usage should parse")
+	}
+	if u.PromptTokens != 12 || u.CompletionTokens != 7 || u.CachedTokens != 3 || u.CachedWriteTokens != 2 || u.TotalTokens != 19 {
+		t.Fatalf("message_delta usage fields lost: %+v", u)
 	}
 }
 

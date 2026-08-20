@@ -193,6 +193,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 
 - users（增删用户/key）、pricing（价格/模型列表/context_length/max_output_tokens）、limits_per_user、master_key、admin_password、rate_limit_per_minute、upstream_base、balance_url、balance_interval_seconds
 - 配置文件非法（JSON 错误或校验不通过）时自动保留旧配置并在日志告警，不影响运行
+- 运行中配置文件被删除或暂时不可读取时会告警并保留最后有效配置；文件恢复后自动重新校验载入（不会用 example 覆盖原配置）
 - 仅 `listen` 变更需要重启生效，检测到时会打印警告日志
 
 ## 智能提额（boost，可选）
@@ -209,7 +210,8 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 
 - 每笔请求按响应中的真实 token 用量 × 单价计费，内部以 1e-8 美元为最小单位累加
 - 窗口 = [重置时间 − 周期, 重置时间)，重置时间来自上游余量接口，三个额度各自独立
-- 任一请求开始前：总池用尽 / 个人窗口超限 / 超频 → 429
+- 三种生成接口必须提供有效的顶层 `model`；缺失、类型错误或非法 JSON 会在本地返回 400，不会转发上游
+- 任一有效生成请求开始前：总池用尽 / 个人窗口超限 / 超频 → 429
 
 ## Web 查询
 

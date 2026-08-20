@@ -213,6 +213,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	transformEnabled := false
 	model := meter.RequestModel(body)
 	price, hasPrice := config.ModelPricing{}, false
+	// 三种生成接口都必须携带顶层非空 model。缺失、类型错误或非法 JSON
+	// 一律在本地拒绝，不能绕过余额/个人限额检查后交给上游处理。
+	if srcOK && model == "" {
+		p.writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "请求缺少有效的 model")
+		return
+	}
 	if model != "" {
 		price, hasPrice = c.Price(model)
 		if !hasPrice {

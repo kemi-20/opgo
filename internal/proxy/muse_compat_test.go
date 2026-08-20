@@ -107,6 +107,28 @@ func TestMuseFieldRemovalHandlesEveryObjectPosition(t *testing.T) {
 	}
 }
 
+func TestMuseFieldRemovalHandlesUnicodeEscapedKeys(t *testing.T) {
+	// JSON 的 Unicode 转义在源字节中不包含实际双引号；扫描器应完整越过，
+	// json.Unmarshal key 后仍能精准识别 tools/type/目标字段。
+	raw := []byte(`{"t\u006f\u006fls":[{"t\u0079pe":"web_search","search\u005fcontent_types":["text"],"keep":"x"}]}`)
+	out, changed := sanitizeMuseResponsesTools(museSparkModel, "openai_responses", raw)
+	if !changed || !json.Valid(out) {
+		t.Fatalf("Unicode 转义键未正确处理: changed=%v out=%s", changed, out)
+	}
+	var envelope struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := envelope.Tools[0]["search_content_types"]; exists {
+		t.Fatalf("转义形式目标字段仍残留: %s", out)
+	}
+	if _, exists := envelope.Tools[0]["keep"]; !exists {
+		t.Fatalf("无关字段被误删: %s", out)
+	}
+}
+
 func TestForwardAppliesMuseCompatibilityAndOnlyToMuse(t *testing.T) {
 	upstream := &fakeUpstream{}
 	upstreamServer := newFakeServer(upstream)

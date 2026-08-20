@@ -106,6 +106,10 @@ type Syncer struct {
 
 	mu   sync.RWMutex
 	snap *Snapshot
+
+	// 最长多久重新检查一次动态 interval。不是抓取频率；只用于让配置把
+	// 长间隔调短后，无需等待旧 timer 到期即可生效。
+	intervalCheck time.Duration
 }
 
 func New(cfgSrc func() *config.Config, timeout time.Duration, log *slog.Logger) *Syncer {
@@ -114,7 +118,8 @@ func New(cfgSrc func() *config.Config, timeout time.Duration, log *slog.Logger) 
 	}
 	return &Syncer{
 		cfgSrc: cfgSrc, timeout: timeout, log: log,
-		client: &http.Client{Timeout: timeout},
+		client:        &http.Client{Timeout: timeout},
+		intervalCheck: time.Second,
 	}
 }
 
@@ -122,14 +127,29 @@ func New(cfgSrc func() *config.Config, timeout time.Duration, log *slog.Logger) 
 func (s *Syncer) Start(ctx context.Context) {
 	go func() {
 		s.fetch()
+		lastFetch := time.Now()
 		for {
-			t := time.NewTimer(s.interval())
+			wait := time.Until(lastFetch.Add(s.interval()))
+			if wait <= 0 {
+				s.fetch()
+				lastFetch = time.Now()
+				continue
+			}
+			check := s.intervalCheck
+			if check <= 0 {
+				check = time.Second
+			}
+			if wait > check {
+				wait = check
+			}
+			t := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
 				t.Stop()
 				return
 			case <-t.C:
-				s.fetch()
+				// 重新进入循环并读取当前配置。若间隔被调短且已到期，
+				// 下一轮会立即抓取；若被调长，则继续等待。
 			}
 		}
 	}()

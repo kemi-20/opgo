@@ -204,8 +204,17 @@ func ParseSSEUsage(line []byte) (Usage, bool) {
 		}
 	case "message_delta":
 		if obj.Usage != nil {
-			u, _ := obj.Usage.usage()
-			return Usage{CompletionTokens: u.CompletionTokens}, true
+			// 标准 Anthropic 当前通常只在这里给 output_tokens，但保留
+			// 上游实际提供的全部 usage 字段，避免未来新增 cache/total
+			// 字段时被代理静默丢弃。mergeUsage 会负责与 message_start 合并。
+			u, ok := obj.Usage.usage()
+			if ok {
+				// usage() 对 input/output 风格会自行计算 total；流式 delta
+				// 只有 output 时这个局部合计不是整次请求总数。仅保留上游
+				// 明确发送的 total_tokens，否则交给 mergeUsage 合并后计算。
+				u.TotalTokens = obj.Usage.TotalTokens
+			}
+			return u, ok
 		}
 	case "response.completed", "response.incomplete":
 		if obj.Response != nil && obj.Response.Usage != nil {
