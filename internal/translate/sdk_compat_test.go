@@ -67,7 +67,7 @@ func TestStreamCompletionsToResponsesSDKCompatible(t *testing.T) {
 				parseErr = append(parseErr, "重复 output_index="+string(rune('0'+idx)))
 			}
 			usedIndex[idx] = true
-		case "response.reasoning_text.delta", "response.output_text.delta", "response.function_call_arguments.delta":
+		case "response.reasoning_summary_text.delta", "response.output_text.delta", "response.function_call_arguments.delta":
 			itemID, _ := ev["item_id"].(string)
 			if !declared[itemID] {
 				parseErr = append(parseErr, typ+" 引用未声明 item_id="+itemID)
@@ -98,12 +98,15 @@ func TestStreamCompletionsToResponsesSDKCompatible(t *testing.T) {
 	// 必须包含 reasoning 增量（mimo 思考）
 	hasReason := false
 	for _, ev := range events {
-		if ev["type"] == "response.reasoning_text.delta" {
+		if ev["type"] == "response.reasoning_summary_text.delta" {
 			hasReason = true
+			if ev["summary_index"] != float64(0) {
+				t.Errorf("reasoning summary delta 缺少 summary_index=0: %v", ev)
+			}
 		}
 	}
 	if !hasReason {
-		t.Errorf("缺少 reasoning_text.delta: %s", dumpEvents(events))
+		t.Errorf("缺少 reasoning_summary_text.delta: %s", dumpEvents(events))
 	}
 	// 必须有 completed 且 usage 完整
 	var lastResp map[string]any

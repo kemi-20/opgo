@@ -366,12 +366,13 @@ type responsesNonStreamResponse struct {
 func buildOpenAIResponsesResponseMeta(resp *Response, meta *Request) ([]byte, error) {
 	responseID := newResponsesID("resp")
 	output := make([]any, 0, 4)
-	// reasoning（对齐原生：content 为 reasoning_text，summary 为空数组）
+	// 转换所得思考按 Responses reasoning summary 返回，使 Codex 等客户端使用
+	// 稳定的摘要增量渲染路径；原生 Responses 请求仍由代理直接透传。
 	if len(resp.Choices) > 0 && resp.Choices[0].Reasoning != "" {
 		output = append(output, responsesReasoningItem{
 			ID: newResponsesID("rs"), Type: "reasoning", Status: "completed",
-			Content: []responsesReasoningContentPart{{Type: "reasoning_text", Text: resp.Choices[0].Reasoning}},
-			Summary: []any{},
+			Content: []responsesReasoningContentPart{},
+			Summary: []any{responsesReasoningContentPart{Type: "summary_text", Text: resp.Choices[0].Reasoning}},
 		})
 	}
 	for _, c := range resp.Choices {

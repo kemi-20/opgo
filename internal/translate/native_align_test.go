@@ -7,7 +7,7 @@ import (
 )
 
 // TestResponsesNativeAlignment 回归测试：mimo 转换到 Responses 的输出必须与
-// 上游原生（deepseek-v4-flash / gpt-5.6-luna）逐字段对齐：
+// GPT 风格的 Responses 客户端事件逐字段对齐：
 // 1) response.created/in_progress/completed 携带完整 response 对象
 // 2) item/part 事件带 status/content_index/logprobs/sequence_number
 // 3) usage 始终含 input/output tokens details
@@ -97,6 +97,11 @@ func TestResponsesNativeAlignment(t *testing.T) {
 	hasPing := false
 	msgStatusOK := false
 	msgPhaseOK := false
+	hasReasonSummaryPart := false
+	hasReasonSummaryDelta := false
+	hasReasonSummaryDone := false
+	hasReasonSummaryPartDone := false
+	hasRawReasoningEvent := false
 	for _, ev := range evs {
 		if ev["sequence_number"] != nil {
 			hasSeq = true
@@ -122,6 +127,16 @@ func TestResponsesNativeAlignment(t *testing.T) {
 			}
 		case "ping":
 			hasPing = true
+		case "response.reasoning_summary_part.added":
+			hasReasonSummaryPart = ev["summary_index"] == float64(0)
+		case "response.reasoning_summary_text.delta":
+			hasReasonSummaryDelta = ev["summary_index"] == float64(0)
+		case "response.reasoning_summary_text.done":
+			hasReasonSummaryDone = ev["summary_index"] == float64(0) && ev["text"] == "think"
+		case "response.reasoning_summary_part.done":
+			hasReasonSummaryPartDone = ev["summary_index"] == float64(0)
+		case "response.reasoning_text.delta", "response.reasoning_text.done":
+			hasRawReasoningEvent = true
 		}
 	}
 	if !hasSeq {
@@ -139,6 +154,12 @@ func TestResponsesNativeAlignment(t *testing.T) {
 	if !hasPing {
 		t.Error("缺少原生结尾 ping 事件")
 	}
+	if !hasReasonSummaryPart || !hasReasonSummaryDelta || !hasReasonSummaryDone || !hasReasonSummaryPartDone {
+		t.Errorf("缺少完整 reasoning summary 生命周期: part=%v delta=%v done=%v partDone=%v", hasReasonSummaryPart, hasReasonSummaryDelta, hasReasonSummaryDone, hasReasonSummaryPartDone)
+	}
+	if hasRawReasoningEvent {
+		t.Error("转换后的 Responses 不应混发 reasoning_text 事件")
+	}
 	// usage 始终带 input/output details
 	usage, _ := completedObj["usage"].(map[string]any)
 	if usage == nil {
@@ -153,7 +174,7 @@ func TestResponsesNativeAlignment(t *testing.T) {
 }
 
 // TestResponsesNonStreamNativeShape 非流式 Responses 输出结构与原生一致：
-// 顶层字段完整、reasoning summary 为空数组、usage 带 details。
+// 顶层字段完整、转换所得思考写入 reasoning summary、usage 带 details。
 func TestResponsesNonStreamNativeShape(t *testing.T) {
 	raw := `{"id":"x","object":"chat.completion","model":"mimo-v2.5","created":123,"choices":[{"index":0,"message":{"role":"assistant","content":"hi","reasoning_content":"think"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
 	meta, _ := ParseRequest(FormatOpenAIResponses, []byte(`{"model":"mimo-v2.5","stream":false,"input":[{"role":"user","content":"hi"}]}`))
@@ -181,8 +202,11 @@ func TestResponsesNonStreamNativeShape(t *testing.T) {
 	if first["type"] != "reasoning" {
 		t.Fatalf("第一个 output item 应为 reasoning: %v", first)
 	}
-	if s, ok := first["summary"].([]any); !ok || len(s) != 0 {
-		t.Errorf("reasoning summary 应为空数组（原生格式）: %v", first["summary"])
+	s, ok := first["summary"].([]any)
+	if !ok || len(s) != 1 {
+		t.Errorf("reasoning summary 未保留完整思考: %v", first["summary"])
+	} else if part, ok := s[0].(map[string]any); !ok || part["type"] != "summary_text" || part["text"] != "think" {
+		t.Errorf("reasoning summary 内容错误: %v", s[0])
 	}
 	usage, _ := obj["usage"].(map[string]any)
 	if _, ok := usage["input_tokens_details"]; !ok {

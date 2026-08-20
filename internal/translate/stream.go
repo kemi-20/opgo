@@ -667,20 +667,29 @@ type responsesContentPartDoneEvent struct {
 	Part           any    `json:"part"`
 }
 
-type responsesReasoningTextDeltaEvent struct {
+type responsesReasoningSummaryPartEvent struct {
 	Type           string `json:"type"`
 	SequenceNumber int    `json:"sequence_number"`
 	OutputIndex    int    `json:"output_index"`
-	ContentIndex   int    `json:"content_index"`
+	SummaryIndex   int    `json:"summary_index"`
+	ItemID         string `json:"item_id"`
+	Part           any    `json:"part"`
+}
+
+type responsesReasoningSummaryTextDeltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	OutputIndex    int    `json:"output_index"`
+	SummaryIndex   int    `json:"summary_index"`
 	ItemID         string `json:"item_id"`
 	Delta          string `json:"delta"`
 }
 
-type responsesReasoningTextDoneEvent struct {
+type responsesReasoningSummaryTextDoneEvent struct {
 	Type           string `json:"type"`
 	SequenceNumber int    `json:"sequence_number"`
 	OutputIndex    int    `json:"output_index"`
-	ContentIndex   int    `json:"content_index"`
+	SummaryIndex   int    `json:"summary_index"`
 	ItemID         string `json:"item_id"`
 	Text           string `json:"text"`
 }
@@ -837,16 +846,16 @@ func (w *responsesStreamWriter) beginReasoning(out *[][]byte) {
 	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "in_progress", Content: []responsesReasoningContentPart{}, Summary: []any{}}
 	ev, _ := json.Marshal(responsesOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(ev))
-	part, _ := json.Marshal(responsesContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "reasoning_text", Text: ""}})
+	part, _ := json.Marshal(responsesReasoningSummaryPartEvent{Type: "response.reasoning_summary_part.added", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, SummaryIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "summary_text", Text: ""}})
 	*out = append(*out, sseData(part))
 }
 
 func (w *responsesStreamWriter) endReasoning(out *[][]byte) {
-	done, _ := json.Marshal(responsesReasoningTextDoneEvent{Type: "response.reasoning_text.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Text: w.reasonAccum})
+	done, _ := json.Marshal(responsesReasoningSummaryTextDoneEvent{Type: "response.reasoning_summary_text.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, SummaryIndex: 0, ItemID: w.itemID, Text: w.reasonAccum})
 	*out = append(*out, sseData(done))
-	cd, _ := json.Marshal(responsesContentPartDoneEvent{Type: "response.content_part.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "reasoning_text", Text: w.reasonAccum}})
+	cd, _ := json.Marshal(responsesReasoningSummaryPartEvent{Type: "response.reasoning_summary_part.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, SummaryIndex: 0, ItemID: w.itemID, Part: responsesReasoningContentPart{Type: "summary_text", Text: w.reasonAccum}})
 	*out = append(*out, sseData(cd))
-	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "completed", Content: []responsesReasoningContentPart{{Type: "reasoning_text", Text: w.reasonAccum}}, Summary: []any{}}
+	item := responsesReasoningItem{ID: w.itemID, Type: "reasoning", Status: "completed", Content: []responsesReasoningContentPart{}, Summary: []any{responsesReasoningContentPart{Type: "summary_text", Text: w.reasonAccum}}}
 	oid, _ := json.Marshal(responsesOutputItemDoneEvent{Type: "response.output_item.done", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, Item: item})
 	*out = append(*out, sseData(oid))
 	w.outputItems = append(w.outputItems, item)
@@ -983,7 +992,7 @@ func (w *responsesStreamWriter) Write(ev StreamEvent, model string) [][]byte {
 			w.beginReasoning(&out)
 		}
 		w.reasonAccum += ev.Reasoning
-		evt, _ := json.Marshal(responsesReasoningTextDeltaEvent{Type: "response.reasoning_text.delta", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, ContentIndex: 0, ItemID: w.itemID, Delta: ev.Reasoning})
+		evt, _ := json.Marshal(responsesReasoningSummaryTextDeltaEvent{Type: "response.reasoning_summary_text.delta", SequenceNumber: w.nextSeq(), OutputIndex: w.outputIndex, SummaryIndex: 0, ItemID: w.itemID, Delta: ev.Reasoning})
 		out = append(out, sseData(evt))
 	case "text":
 		if w.blockType != "text" {
