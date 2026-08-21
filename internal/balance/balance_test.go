@@ -92,7 +92,11 @@ func TestSyncerShorterHotReloadIntervalDoesNotWaitForOldTimer(t *testing.T) {
 	defer server.Close()
 
 	var current atomic.Pointer[config.Config]
-	current.Store(&config.Config{BalanceURL: server.URL, MasterKey: "test-placeholder", BalanceIntervalSeconds: 2})
+	legacy := &config.Config{BalanceURL: server.URL, MasterKey: "test-placeholder", BalanceIntervalSeconds: 2}
+	if err := legacy.ApplyLegacyDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	current.Store(legacy)
 	s := New(func() *config.Config { return current.Load() }, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.intervalCheck = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,12 +113,47 @@ func TestSyncerShorterHotReloadIntervalDoesNotWaitForOldTimer(t *testing.T) {
 	// 旧调度为 2 秒。经过 1 秒后热更新为 1 秒，新实现应在下一次
 	// intervalCheck 立即发现已到期，而不是继续睡满旧的 2 秒 timer。
 	time.Sleep(1050 * time.Millisecond)
-	current.Store(&config.Config{BalanceURL: server.URL, MasterKey: "test-placeholder", BalanceIntervalSeconds: 1})
+	hot := &config.Config{BalanceURL: server.URL, MasterKey: "test-placeholder", BalanceIntervalSeconds: 1}
+	if err := hot.ApplyLegacyDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	current.Store(hot)
 	deadline = time.Now().Add(300 * time.Millisecond)
 	for calls.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if calls.Load() < 2 {
 		t.Fatalf("缩短同步间隔未即时生效，calls=%d", calls.Load())
+	}
+}
+
+func TestCurrentUsesFirstProviderAndBalanceURLOverride(t *testing.T) {
+	cfgRaw := &config.Config{
+		Providers: map[string]config.Provider{
+			"go":  {URL: "https://go.example/v1", Key: "sk-go"},
+			"zen": {URL: "https://zen.example/v1", Key: "sk-zen"},
+		},
+	}
+	if err := cfgRaw.ApplyLegacyDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgRaw
+	if err := cfg.NormalizeProviders(); err != nil {
+		t.Fatal(err)
+	}
+	s := New(func() *config.Config { return cfg }, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	url, token := s.current()
+	if url != "https://go.example/v1/usage" || token != "sk-go" {
+		t.Fatalf("current=%q token=%q, want first provider go", url, token)
+	}
+	if !strings.Contains(url, "/usage") {
+		t.Fatalf("url=%q, 应自动拼接 /usage", url)
+	}
+
+	cfg.BalanceURL = "https://override.example/usage"
+	cfg.BalanceProvider = "zen"
+	url, token = s.current()
+	if url != cfg.BalanceURL || token != "sk-zen" {
+		t.Fatalf("override url=%q token=%q", url, token)
 	}
 }

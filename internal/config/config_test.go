@@ -140,6 +140,55 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+func TestParseNumericListen(t *testing.T) {
+	cfg := strings.Replace(exampleJSON, "\":3003\"", "\"3003\"", 1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":3003" {
+		t.Errorf("listen = %q, want :3003", c.Listen)
+	}
+}
+
+func TestProvidersFirstWins(t *testing.T) {
+	cfg := strings.Replace(exampleJSON, `"upstream_base": "https://PROVIDER_HOST/v1",`,
+		`"providers": {"go": {"url": "https://first/v1", "key": "sk-first"}, "go": {"url": "https://second/v1", "key": "sk-second"}},`, 1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := c.ProviderByName("go")
+	if !ok || p.URL != "https://first/v1" || p.Key != "sk-first" {
+		t.Fatalf("provider = %+v ok=%v, want first wins", p, ok)
+	}
+}
+
+func TestModelProviderDefaultsToFirstAndValidatesReference(t *testing.T) {
+	cfg := strings.Replace(exampleJSON, `"upstream_base": "https://PROVIDER_HOST/v1",`,
+		`"providers": {"go": {"url": "https://go/v1", "key": "sk-go"}, "zen": {"url": "https://zen/v1", "key": "sk-zen"}},`, 1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := c.Price("deepseek-v4-flash")
+	if p.Provider != "go" {
+		t.Fatalf("default provider = %q, want go", p.Provider)
+	}
+	if _, ok := c.ProviderByName("zen"); !ok {
+		t.Fatal("zen provider missing")
+	}
+
+	bad := strings.Replace(cfg, `"provider": "go"`, `"provider": "missing"`, 1)
+	cfgBad, err := Parse([]byte(bad))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if _, ok := cfgBad.ProviderByName("missing"); ok {
+		t.Fatal("未知模型 provider 应校验失败")
+	}
+}
+
 func TestLoadAutoCreate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -279,8 +279,18 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	if nb, changed := sanitizeMuseResponsesTools(model, string(upstreamFormat), body); changed {
 		body = nb
 	}
+	// 按模型 provider 路由；未配置时取第一个/唯一 provider。
+	providerName := ""
+	if hasPrice {
+		providerName = price.Provider
+	}
+	provider, hasProvider := c.ProviderByName(providerName)
+	if !hasProvider {
+		p.writeOpenAIError(w, http.StatusBadGateway, "provider_not_found", "模型 provider 配置无效")
+		return
+	}
 	// 客户端可用标准 OpenAI 路径（/v1/chat/completions 等）：去掉 /v1 前缀后拼接到上游
-	upstream := c.UpstreamBase + upstreamPath
+	upstream := provider.URL + upstreamPath
 	if r.URL.RawQuery != "" {
 		upstream += "?" + r.URL.RawQuery
 	}
@@ -292,8 +302,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	// 最小干预：除认证外全部原样透传（含 UA、Content-Type、其他头）。
 	copyHeaders(req.Header, r.Header)
 	req.Header.Del("Content-Length") // 由 Go 按 body 自动重算（值不变）
-	req.Header.Set("Authorization", "Bearer "+c.MasterKey)
-	req.Header.Set("x-api-key", c.MasterKey)
+	req.Header.Set("Authorization", "Bearer "+provider.Key)
+	req.Header.Set("x-api-key", provider.Key)
 	// Accept-Encoding 强制 identity：代理必须读取响应 body 解析 usage 计费，
 	// 压缩响应无法解析；对客户端透明（Accept-Encoding 仅是偏好）。
 	req.Header.Set("Accept-Encoding", "identity")
@@ -517,6 +527,12 @@ func (p *Proxy) recordUsage(user *config.User, key, model, endpoint string, u me
 	// 峰谷时：模型级 peak 配置，峰时自动乘倍率（config 中为谷时价格）。
 	price = meter.ApplyPeak(price, model, now)
 	cost := meter.CostUnits(price, u)
+	if cost == 0 && meter.HasZeroPrice(price) && u.TotalTokens > 0 {
+		// 免费模型仍要留下真实 token 明细；cost_units=0 是显式免费，不是漏计。
+		p.log.Info("免费模型计费", "uuid", user.UUID, "model", model, "tokens", u.TotalTokens, "cost_usd", 0)
+	} else if cost == 0 && u.TotalTokens > 0 {
+		p.log.Warn("模型价格为零但未显式配置免费，请检查 pricing", "uuid", user.UUID, "model", model, "tokens", u.TotalTokens)
+	}
 	mu := p.lockFor(user.UUID)
 	mu.Lock()
 	defer mu.Unlock()

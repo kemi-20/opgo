@@ -7,14 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"opgo/internal/config"
 )
 
-// DefaultURL 余额接口默认地址（代码内置；config 留空即用此值）。
-const DefaultURL = "https://opencode.ai/zen/go/v1/usage"
+// firstProvider 返回配置中的第一个 provider（书写顺序优先，重复名只取第一个）。
 
 // CapInfo 一个额度的实时状态。
 type CapInfo struct {
@@ -166,13 +166,40 @@ func (s *Syncer) interval() time.Duration {
 // current 返回当前生效的余额接口地址与主 key（热更新后即时取用）。
 func (s *Syncer) current() (url, token string) {
 	if c := s.cfgSrc(); c != nil {
-		url = c.BalanceURL
-		token = c.MasterKey
-	}
-	if url == "" {
-		url = DefaultURL
+		name := c.BalanceProvider
+		if name == "" {
+			name = firstProviderName(c)
+		}
+		if p, ok := providerByName(c, name); ok {
+			if c.BalanceURL != "" {
+				url = c.BalanceURL
+			} else {
+				url = strings.TrimRight(p.URL, "/") + "/usage"
+			}
+			token = p.Key
+		}
 	}
 	return url, token
+}
+
+// firstProviderName 返回第一个 provider 名称；重复名只取第一个。
+func firstProviderName(c *config.Config) string {
+	if names := c.ProviderNames(); len(names) > 0 {
+		return names[0]
+	}
+	return ""
+}
+
+// providerByName 按名称取 provider；空名回退到第一个。
+func providerByName(c *config.Config, name string) (config.Provider, bool) {
+	if name == "" {
+		name = firstProviderName(c)
+	}
+	if name == "" {
+		return config.Provider{}, false
+	}
+	p, ok := c.Providers[name]
+	return p, ok
 }
 
 func (s *Syncer) fetch() {

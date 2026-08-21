@@ -43,6 +43,12 @@ func CostUnits(p config.ModelPricing, u Usage) int64 {
 	return int64(math.Round(cost * UnitsPerUSD))
 }
 
+// HasZeroPrice 模型是否显式配置为完全免费。用于区分“免费模型”与“漏配置价格”。
+func HasZeroPrice(p config.ModelPricing) bool {
+	return p.InputPerMillion == 0 && p.OutputPerMillion == 0 &&
+		p.CachedReadPerMillion == 0 && p.CachedWritePerMillion == 0
+}
+
 // RequestModel 从请求体提取模型名。
 func RequestModel(body []byte) string {
 	var obj struct {

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,6 +37,8 @@ type ModelPricing struct {
 	// Modality 模型模态，格式 "输入1+输入2->输出1"；空 = "text->text"。
 	// /v1/models 会拆成 architecture.modality / input_modalities / output_modalities。
 	Modality string `json:"modality"`
+	// Provider 引用顶层 providers 中的名称；为空时使用唯一/第一个 provider。
+	Provider string `json:"provider"`
 }
 
 // ModalityInfo 解析后的模态信息。
@@ -110,6 +114,12 @@ type User struct {
 	Limits map[string]float64 `json:"limits"`
 }
 
+// Provider 一个上游服务：地址与其母 key。母 key 只在服务端内存中使用。
+type Provider struct {
+	URL string `json:"url"`
+	Key string `json:"key"`
+}
+
 // Boost 临期额度机制（可选）。
 // enabled 时：正常硬卡 = 限额×BaseOveragePercent/100（防对话中途断）；
 // 某窗口 used ≥ TriggerPercent%×当前档限额 且满足池子/跨窗口健康时，智能提额到
@@ -179,17 +189,20 @@ type Config struct {
 	MasterKey              string                  `json:"master_key"`
 	AdminPassword          string                  `json:"admin_password"`
 	BalanceURL             string                  `json:"balance_url"`
+	BalanceProvider        string                  `json:"balance_provider"`
 	BalanceIntervalSeconds int                     `json:"balance_interval_seconds"`
 	RateLimitPerMinute     int                     `json:"rate_limit_per_minute"`
 	LimitsPerUser          map[string]float64      `json:"limits_per_user"`
+	Providers              map[string]Provider     `json:"providers"`
 	Pricing                map[string]ModelPricing `json:"pricing"`
 	Boost                  Boost                   `json:"boost"`
 	Users                  []User                  `json:"users"`
 
-	keyIndex   map[string]*User
-	userIndex  map[string]*User
-	modelOrder []string
-	rawPricing map[string]RawPrice
+	keyIndex      map[string]*User
+	userIndex     map[string]*User
+	modelOrder    []string
+	providerOrder []string
+	rawPricing    map[string]RawPrice
 }
 
 func DefaultConfigPath() string {
@@ -303,10 +316,14 @@ func stripJSONComments(data []byte) []byte {
 func Parse(data []byte) (*Config, error) {
 	data = stripJSONComments(data)
 	var c Config
-	if err := json.Unmarshal(data, &c); err != nil {
+	if err := decodeFirstWins(data, &c); err != nil {
 		return nil, fmt.Errorf("配置不是合法 JSON: %w", err)
 	}
+	if err := c.ApplyLegacyDefaults(); err != nil {
+		return nil, err
+	}
 	c.modelOrder = objectKeyOrder(data, "pricing")
+	c.providerOrder = objectKeyOrder(data, "providers")
 	c.rawPricing = objectRawPricing(data)
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -314,13 +331,152 @@ func Parse(data []byte) (*Config, error) {
 	return &c, nil
 }
 
+// decodeFirstWins 解析配置并保留重复键的第一次出现值。
+// encoding/json 默认后写覆盖，不符合“重复配置只取第一个”的规则；这里用
+// Decoder 逐 token 重建 map，遇到已存在键时跳过后续值。
+func decodeFirstWins(data []byte, out *Config) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	v, err := decodeValueFirstWins(dec)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func decodeValueFirstWins(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return tok, nil
+	}
+	switch delim {
+	case '{':
+		out := map[string]any{}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, _ := keyTok.(string)
+			val, err := decodeValueFirstWins(dec)
+			if err != nil {
+				return nil, err
+			}
+			if _, exists := out[key]; !exists {
+				out[key] = val
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case '[':
+		var out []any
+		for dec.More() {
+			val, err := decodeValueFirstWins(dec)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, val)
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		if out == nil {
+			out = []any{}
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("非法 JSON 分隔符: %q", delim)
+}
+
+// ApplyLegacyDefaults 兼容旧版单上游配置：providers 为空时，把顶层
+// upstream_base / master_key 视为一个名为 default 的 provider。
+func (c *Config) ApplyLegacyDefaults() error {
+	if len(c.Providers) > 0 || (c.UpstreamBase == "" && c.MasterKey == "") {
+		return c.NormalizeProviders()
+	}
+	c.Providers = map[string]Provider{
+		"default": {URL: c.UpstreamBase, Key: c.MasterKey},
+	}
+	c.providerOrder = []string{"default"}
+	return nil
+}
+
+// NormalizeProviders 重建 provider 顺序并校验每个 provider；供解析与审计副本重建后调用。
+func (c *Config) NormalizeProviders() error {
+	if len(c.Providers) == 0 {
+		return errors.New("providers 不能为空（或提供旧版 upstream_base/master_key）")
+	}
+	if len(c.providerOrder) == 0 {
+		c.providerOrder = make([]string, 0, len(c.Providers))
+		for name := range c.Providers {
+			c.providerOrder = append(c.providerOrder, name)
+		}
+	}
+	c.providerOrder = dedupeKeepFirst(c.providerOrder)
+	for _, name := range c.providerOrder {
+		p, ok := c.Providers[name]
+		if !ok {
+			continue
+		}
+		p.URL = strings.TrimRight(p.URL, "/")
+		c.Providers[name] = p
+	}
+	names := make([]string, 0, len(c.Providers))
+	for name := range c.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := c.Providers[name]
+		p.URL = strings.TrimRight(p.URL, "/")
+		c.Providers[name] = p
+		if p.URL == "" {
+			return fmt.Errorf("providers[%s].url 不能为空", name)
+		}
+		if u, err := url.Parse(p.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("providers[%s].url 必须是合法的 http(s) 地址", name)
+		}
+		if p.Key == "" {
+			return fmt.Errorf("providers[%s].key 不能为空", name)
+		}
+	}
+	return nil
+}
+
 func (c *Config) applyDefaults() {
+	c.Listen = normalizeListen(c.Listen)
 	if c.Listen == "" {
 		c.Listen = ":3003"
 	}
 	if c.BalanceIntervalSeconds <= 0 {
 		c.BalanceIntervalSeconds = 120
 	}
+}
+
+// normalizeListen 兼容三种 listen 写法：":3003"、"3003"、"0.0.0.0:3003"。
+// 纯数字按本机所有接口端口处理；非法值返回空串，由默认值或校验处理。
+func normalizeListen(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, ":") {
+		return v
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 65535 {
+		return ":" + strconv.Itoa(n)
+	}
+	return v
 }
 
 func (c *Config) validate() error {
@@ -346,21 +502,19 @@ func (c *Config) validate() error {
 			return errors.New("boost.max_boost_times 不能为负数（0 = 不限次数）")
 		}
 	}
-	if c.UpstreamBase == "" {
-		return errors.New("upstream_base 不能为空")
-	}
-	c.UpstreamBase = strings.TrimRight(c.UpstreamBase, "/")
-	if u, err := url.Parse(c.UpstreamBase); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("upstream_base 必须是合法的 http(s) 地址")
-	}
 	if c.BalanceURL != "" {
 		c.BalanceURL = strings.TrimRight(c.BalanceURL, "/")
 		if u, err := url.Parse(c.BalanceURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return errors.New("balance_url 必须是合法的 http(s) 地址")
 		}
 	}
-	if c.MasterKey == "" {
-		return errors.New("master_key 不能为空")
+	if err := c.NormalizeProviders(); err != nil {
+		return err
+	}
+	if c.BalanceProvider != "" {
+		if _, ok := c.ProviderByName(c.BalanceProvider); !ok {
+			return errors.New("balance_provider 必须引用 providers 中已有的名称")
+		}
 	}
 	if c.AdminPassword == "" {
 		return errors.New("admin_password 不能为空")
@@ -377,6 +531,21 @@ func (c *Config) validate() error {
 	for name, p := range c.Pricing {
 		if p.InputPerMillion < 0 || p.OutputPerMillion < 0 || p.CachedReadPerMillion < 0 || p.CachedWritePerMillion < 0 {
 			return fmt.Errorf("pricing[%s] 价格不能为负数", name)
+		}
+		if p.Provider != "" {
+			found := false
+			for _, n := range c.ProviderNames() {
+				if n == p.Provider {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("pricing[%s].provider 必须引用 providers 中已有的名称: %s", name, p.Provider)
+			}
+		} else {
+			p.Provider = c.ProviderNames()[0]
+			c.Pricing[name] = p
 		}
 	}
 	for _, v := range c.LimitsPerUser {
@@ -419,8 +588,62 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// dedupeKeepFirst 去重并保留第一次出现的顺序。
+func dedupeKeepFirst(values []string) []string {
+	seen := map[string]bool{}
+	out := values[:0]
+	for _, v := range values {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 func (c *Config) UserByKey(key string) *User   { return c.keyIndex[key] }
 func (c *Config) UserByUUID(uuid string) *User { return c.userIndex[uuid] }
+
+// ProviderByName 按名称取 provider；重复配置只取第一个（书写顺序）。
+func (c *Config) ProviderByName(name string) (Provider, bool) {
+	if name == "" {
+		if len(c.providerOrder) == 0 {
+			return Provider{}, false
+		}
+		name = c.providerOrder[0]
+	}
+	if seen := map[string]bool{}; true {
+		for _, n := range c.providerOrder {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			if n == name {
+				p, ok := c.Providers[n]
+				return p, ok
+			}
+		}
+	}
+	p, ok := c.Providers[name]
+	return p, ok
+}
+
+// ProviderNames 返回 providers 的书写顺序（重复名已去重，只保留第一个）。
+func (c *Config) ProviderNames() []string {
+	if len(c.providerOrder) == 0 && len(c.Providers) > 0 {
+		return dedupeKeepFirst(mapKeys(c.Providers))
+	}
+	return append([]string(nil), c.providerOrder...)
+}
+
+func mapKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
 
 // Price 查询模型价格。
 func (c *Config) Price(model string) (ModelPricing, bool) {

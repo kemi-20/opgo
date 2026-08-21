@@ -236,6 +236,65 @@ func TestForwardNonStream(t *testing.T) {
 	}
 }
 
+// TestForwardRoutesModelProvider 验证多 provider：不同模型按 pricing.provider
+// 路由到不同上游，并使用各自 provider key，而不是全局单一母 key。
+func TestForwardRoutesModelProvider(t *testing.T) {
+	goUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("go upstream path=%s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer go-key-test" || r.Header.Get("x-api-key") != "go-key-test" {
+			t.Errorf("go upstream auth=%q x-api=%q", r.Header.Get("Authorization"), r.Header.Get("x-api-key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"go","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"from-go"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	}))
+	defer goUpstream.Close()
+	zenUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("zen upstream path=%s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer zen-key-test" || r.Header.Get("x-api-key") != "zen-key-test" {
+			t.Errorf("zen upstream auth=%q x-api=%q", r.Header.Get("Authorization"), r.Header.Get("x-api-key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"zen","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"from-zen"}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`)
+	}))
+	defer zenUpstream.Close()
+
+	p, db := newTestProxy(t, goUpstream.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		c.Providers = map[string]config.Provider{
+			"go":  {URL: goUpstream.URL, Key: "go-key-test"},
+			"zen": {URL: zenUpstream.URL, Key: "zen-key-test"},
+		}
+		if err := c.NormalizeProviders(); err != nil {
+			t.Fatal(err)
+		}
+		pr := c.Pricing["mimo-v2.5"]
+		pr.Provider = "go"
+		c.Pricing["mimo-v2.5"] = pr
+		c.Pricing["provider-routed-free"] = config.ModelPricing{Provider: "zen"}
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	if status, body, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1,
+		`{"model":"mimo-v2.5","messages":[{"role":"user","content":"hi"}]}`); status != 200 || !strings.Contains(body, "from-go") {
+		t.Fatalf("go route status=%d body=%s", status, body)
+	}
+	if status, body, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1,
+		`{"model":"provider-routed-free","messages":[{"role":"user","content":"hi"}]}`); status != 200 || !strings.Contains(body, "from-zen") {
+		t.Fatalf("zen route status=%d body=%s", status, body)
+	}
+	sumGo, err := db.UserWindowSum("uuid-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sumGo <= 0 {
+		t.Fatalf("provider routed usage not recorded: %d", sumGo)
+	}
+}
+
 func TestForwardStream(t *testing.T) {
 	fu := &fakeUpstream{stream: true}
 	up := httptest.NewServer(fu.handler())

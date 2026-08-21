@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,17 @@ func fixedSnapshot() *balance.Snapshot {
 	}
 }
 
+func cloneProviders(src map[string]config.Provider) map[string]config.Provider {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]config.Provider, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
 // Run 密钥防泄露自检：加载真实 config，用临时 sqlite + 本地假上游探测全部端点，
 // 断言任何响应体/响应头都不含母 key 与任何子 key；假上游收到母 key 视为正向校验。
 func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
@@ -56,7 +68,13 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		}
 	}
 
-	keys := []string{cfg.MasterKey}
+	keys := []string{}
+	for _, p := range cfg.Providers {
+		keys = append(keys, p.Key)
+	}
+	if cfg.MasterKey != "" {
+		keys = append(keys, cfg.MasterKey)
+	}
 	for i := range cfg.Users {
 		keys = append(keys, cfg.Users[i].Keys...)
 	}
@@ -93,7 +111,22 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	defer fakeUpstream.Close()
 
 	cfgUp := *cfg
-	cfgUp.UpstreamBase = fakeUpstream.URL
+	cfgUp.Providers = cloneProviders(cfg.Providers)
+	if len(cfgUp.Providers) == 0 {
+		cfgUp.Providers = map[string]config.Provider{
+			"default": {URL: fakeUpstream.URL, Key: cfgUp.MasterKey},
+		}
+	} else if err := cfgUp.NormalizeProviders(); err != nil {
+		return err
+	}
+	for _, name := range cfgUp.ProviderNames() {
+		p, ok := cfgUp.Providers[name]
+		if !ok {
+			continue
+		}
+		p.URL = fakeUpstream.URL
+		cfgUp.Providers[name] = p
+	}
 
 	db1Path := filepath.Join(os.TempDir(), fmt.Sprintf("opgo-audit-main-%d.db", time.Now().UnixNano()))
 	db1, err := store.Open(db1Path)
@@ -110,6 +143,7 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	defer srv2.Close()
 
 	cfgTiny := cfgUp
+	cfgTiny.Providers = cloneProviders(cfgUp.Providers)
 	cfgTiny.LimitsPerUser = map[string]float64{"5h": 0.00000001, "1w": 0.00000001, "1m": 0.00000001}
 	db2Path := filepath.Join(os.TempDir(), fmt.Sprintf("opgo-audit-tiny-%d.db", time.Now().UnixNano()))
 	db2, err := store.Open(db2Path)
@@ -123,13 +157,28 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	defer srv3.Close()
 
 	cfgBad := cfgUp
-	cfgBad.UpstreamBase = "http://127.0.0.1:1"
+	cfgBad.Providers = cloneProviders(cfgUp.Providers)
+	names := make([]string, 0, len(cfgBad.Providers))
+	for name := range cfgBad.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := cfgBad.Providers[name]
+		p.URL = "http://127.0.0.1:1"
+		cfgBad.Providers[name] = p
+	}
 	mgrBad := config.NewManager(&cfgBad, "", nil, log)
 	srv4 := httptest.NewServer(proxy.New(mgrBad, db2, indexHTML, &fixedBalance{snap: fixedSnapshot()}, log))
 	defer srv4.Close()
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	userKey := cfg.Users[0].Keys[0]
+	forwardModel := "deepseek-v4-flash"
+	if _, ok := cfg.Price(forwardModel); !ok && len(cfg.ModelNames()) > 0 {
+		forwardModel = cfg.ModelNames()[0]
+	}
+	chatBody := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, forwardModel)
 
 	check("首页不含 key", func() error {
 		status, body, hdr := get(client, srv1.URL+"/")
@@ -257,7 +306,7 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		gotPath = ""
 		mu.Unlock()
 		status, body, hdr := req(client, http.MethodPost, srv1.URL+"/v1/chat/completions", "Bearer "+userKey,
-			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+			chatBody)
 		if status != 200 {
 			return fmt.Errorf("转发状态 %d: %s", status, body)
 		}
@@ -268,7 +317,12 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 		a := gotAuth
 		pa := gotPath
 		mu.Unlock()
-		if a != "Bearer "+cfg.MasterKey {
+		modelProvider, _ := cfg.Price(forwardModel)
+		wantProvider, okProvider := cfg.ProviderByName(modelProvider.Provider)
+		if !okProvider {
+			return fmt.Errorf("模型 provider 未配置")
+		}
+		if a != "Bearer "+wantProvider.Key {
 			return fmt.Errorf("假上游收到 %q，期望 Bearer 母 key", a)
 		}
 		if pa != "/chat/completions" {
@@ -303,7 +357,7 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	})
 	check("余额未同步 → 503 无泄露", func() error {
 		status, body, hdr := req(client, http.MethodPost, srv2.URL+"/v1/chat/completions", "Bearer "+userKey,
-			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+			chatBody)
 		if status != 503 {
 			return fmt.Errorf("状态 %d", status)
 		}
@@ -311,12 +365,12 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	})
 	check("个人限额 → 429 无泄露", func() error {
 		first, _, _ := req(client, http.MethodPost, srv3.URL+"/v1/chat/completions", "Bearer "+userKey,
-			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+			chatBody)
 		if first != 200 {
 			return fmt.Errorf("首次请求状态 %d", first)
 		}
 		status, body, hdr := req(client, http.MethodPost, srv3.URL+"/v1/chat/completions", "Bearer "+userKey,
-			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+			chatBody)
 		if status != 429 {
 			return fmt.Errorf("状态 %d", status)
 		}
@@ -324,7 +378,7 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 	})
 	check("上游不可达 → 502 无泄露", func() error {
 		status, body, hdr := req(client, http.MethodPost, srv4.URL+"/v1/chat/completions", "Bearer "+userKey,
-			"{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+			chatBody)
 		if status != 502 {
 			return fmt.Errorf("状态 %d", status)
 		}

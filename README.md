@@ -59,16 +59,37 @@ go build -o opgo.exe .
 | 字段 | 说明 |
 | --- | --- |
 | listen | 监听地址，默认 :3003 |
-| upstream_base | 上游地址（必填） |
-| master_key | 母 key（必填） |
+| providers | 多上游配置：`名称 = { url, key }`；同名 provider 重复时只取第一个（必填；旧版单上游字段自动兼容） |
+| pricing.<model>.provider | 模型引用 providers 名称；留空自动使用第一个 provider，引用不存在名称时配置校验失败 |
 | admin_password | Web 管理员密码（必填） |
-| balance_url | 余量接口，留空用默认值 |
+| balance_provider | 余额接口使用哪个 provider 的 key；留空使用第一个 provider |
+| balance_url | 覆盖余额接口 URL；key 仍来自 balance_provider 或第一个 provider |
 | balance_interval_seconds | 余量同步间隔，默认 120 |
 | rate_limit_per_minute | 每用户每分钟限流，0=不限 |
 | limits_per_user | 每人的 5h/1w/1m 美元限额 |
 | pricing | 模型单价（每百万 token，config 填谷时价）+ context_length + max_output_tokens + modality + transformation + tag（前端模型名右侧标签，可空） |
 | boost | 智能提额（见下） |
 | users | uuid + 备注（可空）+ key 列表 |
+
+### 多 provider
+
+```jsonc
+{
+  "providers": {
+    "go":  { "url": "https://PROVIDER_HOST_GO/v1", "key": "sk-GO_KEY" },
+    "zen": { "url": "https://PROVIDER_HOST_ZEN/v1", "key": "sk-ZEN_KEY" }
+  },
+  "pricing": {
+    "hy3": { "provider": "go", "input_per_million": 0.14, "output_per_million": 0.58 },
+    "x-preview-f-free": { "provider": "zen", "input_per_million": 0, "output_per_million": 0 }
+  }
+}
+```
+
+- 模型 `provider` 留空时自动绑定第一个 provider；引用不存在名称会在配置校验时失败。
+- 同名 `providers` 条目重复时只取第一个；同名模型重复时同样只取第一个。
+- `balance_provider` 指定余额接口使用哪个 provider 的 key；留空使用第一个 provider。`balance_url` 可覆盖余额接口 URL，但 key 仍来自所选 provider。
+- 兼容旧版单上游：只有 `upstream_base` / `master_key` 的配置会自动转换成名为 `default` 的 provider。
 
 ## 峰谷时（peak）
 
@@ -191,7 +212,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 
 程序后台每 1 秒轮询 config 文件，修改保存后**无需重启**立即生效：
 
-- users（增删用户/key）、pricing（价格/模型列表/context_length/max_output_tokens）、limits_per_user、master_key、admin_password、rate_limit_per_minute、upstream_base、balance_url、balance_interval_seconds
+- users（增删用户/key）、pricing（价格/模型列表/context_length/max_output_tokens/provider）、limits_per_user、providers（url/key）、admin_password、rate_limit_per_minute、balance_url、balance_provider、balance_interval_seconds
 - 配置文件非法（JSON 错误或校验不通过）时自动保留旧配置并在日志告警，不影响运行
 - 运行中配置文件被删除或暂时不可读取时会告警并保留最后有效配置；文件恢复后自动重新校验载入（不会用 example 覆盖原配置）
 - 仅 `listen` 变更需要重启生效，检测到时会打印警告日志
