@@ -128,13 +128,17 @@ func TestSyncerShorterHotReloadIntervalDoesNotWaitForOldTimer(t *testing.T) {
 }
 
 func TestCurrentUsesFirstProviderAndBalanceURLOverride(t *testing.T) {
-	cfgRaw := &config.Config{
-		Providers: map[string]config.Provider{
-			"go":  {URL: "https://go.example/v1", Key: "sk-go"},
-			"zen": {URL: "https://zen.example/v1", Key: "sk-zen"},
+	cfgRaw, err := config.Parse([]byte(`{
+		"listen": ":0",
+		"providers": {
+			"go":  {"url": "https://go.example/v1", "key": "sk-go"},
+			"zen": {"url": "https://zen.example/v1", "key": "sk-zen"}
 		},
-	}
-	if err := cfgRaw.ApplyLegacyDefaults(); err != nil {
+		"admin_password": "test-admin",
+		"pricing": {"model-a": {"provider": "go", "input_per_million": 0}},
+		"users": [{"uuid": "uuid-balance", "keys": ["sk-user-balance"]}]
+	}`))
+	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := cfgRaw
