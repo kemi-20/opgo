@@ -601,12 +601,17 @@ func blocksToResponsesOutput(blocks []Block) any {
 // ---------- 序列化到 Anthropic ----------
 
 func buildAnthropicRequest(req *Request) ([]byte, error) {
+	const defaultAnthropicMaxTokens = 4096
 	out := map[string]any{
 		"model":  req.Model,
 		"stream": req.Stream,
 	}
-	if req.MaxTokens != nil {
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out["max_tokens"] = *req.MaxTokens
+	} else {
+		// Anthropic 强制要求 max_tokens。客户端省略时使用保守默认值，
+		// 保证 chat/responses → anthropic 转换不会因缺字段被上游拒绝。
+		out["max_tokens"] = defaultAnthropicMaxTokens
 	}
 	if req.Temperature != nil {
 		out["temperature"] = *req.Temperature

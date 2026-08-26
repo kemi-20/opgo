@@ -107,6 +107,47 @@ func TestConvertCompletionsToAnthropicRequest(t *testing.T) {
 	}
 }
 
+// TestAnthropicRequestDefaultsMaxTokens 验证 Anthropic 强制字段的转换兜底：
+// 客户端省略 max_tokens/max_output_tokens 时，转出的 anthropic 请求必须带保守默认值。
+func TestAnthropicRequestDefaultsMaxTokens(t *testing.T) {
+	raw := []byte(`{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := ConvertRequest(FormatOpenAICompletions, FormatAnthropic, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["max_tokens"] != float64(4096) {
+		t.Fatalf("max_tokens=%v, want default 4096", obj["max_tokens"])
+	}
+
+	explicit := []byte(`{"model":"m","stream":false,"max_output_tokens":123,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	out, err = ConvertRequest(FormatOpenAIResponses, FormatAnthropic, explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["max_tokens"] != float64(123) {
+		t.Fatalf("max_tokens=%v, want explicit 123", obj["max_tokens"])
+	}
+
+	responsesFallback := []byte(`{"model":"m","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	out, err = ConvertRequest(FormatOpenAIResponses, FormatAnthropic, responsesFallback, WithAnthropicMaxTokensFallback(384000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["max_tokens"] != float64(384000) {
+		t.Fatalf("max_tokens=%v, want model fallback 384000", obj["max_tokens"])
+	}
+}
+
 func TestConvertCompletionsToResponsesRequest(t *testing.T) {
 	raw := []byte(`{
 		"model": "mimo-v2.5",

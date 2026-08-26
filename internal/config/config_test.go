@@ -189,6 +189,32 @@ func TestModelProviderDefaultsToFirstAndValidatesReference(t *testing.T) {
 	}
 }
 
+func TestDuplicatePricingKeepsFirstForBillingAndDisplay(t *testing.T) {
+	cfg := strings.Replace(exampleJSON,
+		`"pricing": {`,
+		`"pricing": {"test-model": {"input_per_million": 9.99, "output_per_million": 19.98, "tag": "second", "input_per_million": 0.12, "output_per_million": 0.24, "tag": "first"},`, 1)
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := c.Price("test-model")
+	if !ok || p.InputPerMillion != 9.99 || p.OutputPerMillion != 19.98 || p.Tag != "second" {
+		t.Fatalf("price=%+v ok=%v, want first-wins values", p, ok)
+	}
+	if got := c.ModelNames(); len(got) == 0 || got[0] != "test-model" {
+		t.Fatalf("model order=%v, want duplicate name once at front", got)
+	}
+	for _, name := range c.ModelNames()[1:] {
+		if name == "test-model" {
+			t.Fatal("RawPricing/model order repeats duplicate model")
+		}
+	}
+	raw := c.RawPricing()
+	if len(raw) == 0 || raw[0].Model != "test-model" || raw[0].Price.Tag != "second" || raw[0].Price.InputPerMillion != "9.99" {
+		t.Fatalf("raw pricing=%+v, want first occurrence", raw)
+	}
+}
+
 func TestLoadAutoCreate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

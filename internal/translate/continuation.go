@@ -12,7 +12,7 @@ const maxPreludeContinuations = 3
 // 要求继续采样；Chat Completions 没有对应字段，所以转换层需要保守补齐语义。
 //
 // 规则刻意收窄：必须配置了工具、文本较短、同时包含继续标记和动作词；并且同一
-// 历史最多救援三次，避免能力较弱的模型反复输出过渡句形成无限循环。
+// 用户轮次最多救援三次，避免能力较弱的模型反复输出过渡句形成无限循环。
 func shouldContinueAfterPrelude(text string, meta *Request) bool {
 	if meta == nil || len(meta.Tools) == 0 {
 		return false
@@ -25,22 +25,25 @@ func shouldContinueAfterPrelude(text string, meta *Request) bool {
 		return false
 	}
 
-	seen := 0
-	// 只统计历史末尾连续的过渡句；一旦出现用户消息、工具结果或正常回答就重置。
-	// 这样上限约束单次卡住的采样链，不会污染后续独立对话。
+	// 找到最近一次用户输入。同一用户轮次内的后续采样都受同一个上限约束；
+	// 新的用户消息会重置计数，不会污染后续独立对话。
+	lastUser := -1
 	for i := len(meta.Messages) - 1; i >= 0; i-- {
-		message := meta.Messages[i]
-		if message.Role != "assistant" {
+		if meta.Messages[i].Role == "user" {
+			lastUser = i
 			break
 		}
+	}
+
+	seen := 0
+	for i := lastUser + 1; i < len(meta.Messages); i++ {
+		message := meta.Messages[i]
 		candidate := message.Text
 		if candidate == "" {
 			candidate = blocksText(message.Content)
 		}
-		if looksLikeUnfinishedPrelude(candidate) {
+		if message.Role == "assistant" && looksLikeUnfinishedPrelude(candidate) {
 			seen++
-		} else {
-			break
 		}
 	}
 	return seen < maxPreludeContinuations

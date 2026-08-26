@@ -253,7 +253,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	var reqMeta *translate.Request
 	if transformEnabled {
 		reqMeta, _ = translate.ParseRequest(srcFormat, body)
-		nb, err := translate.ConvertRequest(srcFormat, dstFormat, body)
+		opts := make([]translate.RequestOption, 0, 1)
+		if dstFormat == translate.FormatAnthropic && hasPrice && price.MaxOutputTokens > 0 {
+			opts = append(opts, translate.WithAnthropicMaxTokensFallback(int(price.MaxOutputTokens)))
+		}
+		nb, err := translate.ConvertRequest(srcFormat, dstFormat, body, opts...)
 		if err != nil {
 			p.log.Warn("请求协议转换失败", "err", err, "uuid", user.UUID, "model", model)
 			p.writeOpenAIError(w, http.StatusBadGateway, "translate_error", "请求协议转换失败")
@@ -505,15 +509,27 @@ func shouldSendSSEHeartbeat(model string) bool {
 	return model == "muse-spark-1.2-contributor"
 }
 
-// mergeUsage 合并一次用量到累计（补全字段）。
+// mergeUsage 合并流式过程中出现的多段 usage。OpenAI/Responses 的 usage 是
+// 末尾一次性终值；Anthropic 的 message_start/message_delta 虽分开发送，但
+// output_tokens 都是累计语义（start 的占位值会被 delta 终值覆盖）。因此输出
+// token 采用赋值合并，输入/cache 也保持终值覆盖，避免把 start 占位与 delta
+// 累计值相加造成多算。
 func mergeUsage(acc *meter.Usage, u meter.Usage) {
-	if u.PromptTokens > 0 || u.CachedTokens > 0 || u.CachedWriteTokens > 0 {
+	if u.PromptTokens > 0 {
 		acc.PromptTokens = u.PromptTokens
+	}
+	if u.CachedTokens > 0 {
 		acc.CachedTokens = u.CachedTokens
+	}
+	if u.CachedWriteTokens > 0 {
 		acc.CachedWriteTokens = u.CachedWriteTokens
 	}
-	acc.CompletionTokens += u.CompletionTokens
-	acc.ReasoningTokens += u.ReasoningTokens
+	if u.CompletionTokens > 0 {
+		acc.CompletionTokens = u.CompletionTokens
+	}
+	if u.ReasoningTokens > 0 {
+		acc.ReasoningTokens = u.ReasoningTokens
+	}
 	if u.TotalTokens > 0 {
 		acc.TotalTokens = u.TotalTokens
 	} else if acc.PromptTokens > 0 || acc.CompletionTokens > 0 {
@@ -772,21 +788,38 @@ func removeHopHeaders(h http.Header) {
 
 // rateLimiter 每 uuid 滑动窗口限流。
 type rateLimiter struct {
-	mu   sync.Mutex
-	hits map[string][]time.Time
+	mu        sync.Mutex
+	hits      map[string][]time.Time
+	lastSweep time.Time
 }
 
 func newRateLimiter() *rateLimiter {
-	return &rateLimiter{hits: map[string][]time.Time{}}
+	return &rateLimiter{hits: map[string][]time.Time{}, lastSweep: time.Now()}
 }
 
 func (r *rateLimiter) allow(uuid string, limitPerMinute int, now time.Time) bool {
-	if limitPerMinute <= 0 {
-		return true
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cutoff := now.Add(-time.Minute)
+	if now.Sub(r.lastSweep) >= time.Minute {
+		for uuid, times := range r.hits {
+			kept := times[:0]
+			for _, hit := range times {
+				if hit.After(cutoff) {
+					kept = append(kept, hit)
+				}
+			}
+			if len(kept) == 0 {
+				delete(r.hits, uuid)
+			} else {
+				r.hits[uuid] = kept
+			}
+		}
+		r.lastSweep = now
+	}
+	if limitPerMinute <= 0 {
+		return true
+	}
 	kept := r.hits[uuid][:0]
 	for _, t := range r.hits[uuid] {
 		if t.After(cutoff) {

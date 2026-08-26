@@ -322,8 +322,8 @@ func Parse(data []byte) (*Config, error) {
 	if err := c.ApplyLegacyDefaults(); err != nil {
 		return nil, err
 	}
-	c.modelOrder = objectKeyOrder(data, "pricing")
-	c.providerOrder = objectKeyOrder(data, "providers")
+	c.modelOrder = dedupeKeepFirst(objectKeyOrder(data, "pricing"))
+	c.providerOrder = dedupeKeepFirst(objectKeyOrder(data, "providers"))
 	c.rawPricing = objectRawPricing(data)
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -417,26 +417,39 @@ func (c *Config) NormalizeProviders() error {
 		return errors.New("providers 不能为空（或提供旧版 upstream_base/master_key）")
 	}
 	if len(c.providerOrder) == 0 {
-		c.providerOrder = make([]string, 0, len(c.Providers))
+		names := make([]string, 0, len(c.Providers))
 		for name := range c.Providers {
-			c.providerOrder = append(c.providerOrder, name)
+			names = append(names, name)
 		}
+		sort.Strings(names)
+		c.providerOrder = names
 	}
-	c.providerOrder = dedupeKeepFirst(c.providerOrder)
+	ordered := make([]string, 0, len(c.Providers))
+	seen := make(map[string]bool, len(c.Providers))
 	for _, name := range c.providerOrder {
-		p, ok := c.Providers[name]
-		if !ok {
+		if seen[name] {
 			continue
 		}
-		p.URL = strings.TrimRight(p.URL, "/")
-		c.Providers[name] = p
+		seen[name] = true
+		if _, ok := c.Providers[name]; !ok {
+			continue
+		}
+		ordered = append(ordered, name)
 	}
-	names := make([]string, 0, len(c.Providers))
+	allNames := make([]string, 0, len(c.Providers))
 	for name := range c.Providers {
-		names = append(names, name)
+		allNames = append(allNames, name)
 	}
-	sort.Strings(names)
-	for _, name := range names {
+	sort.Strings(allNames)
+	missing := make([]string, 0, len(allNames))
+	for _, name := range allNames {
+		if !seen[name] {
+			missing = append(missing, name)
+		}
+	}
+	c.providerOrder = append(ordered, missing...)
+	c.providerOrder = dedupeKeepFirst(c.providerOrder)
+	for _, name := range allNames {
 		p := c.Providers[name]
 		p.URL = strings.TrimRight(p.URL, "/")
 		c.Providers[name] = p
@@ -607,26 +620,20 @@ func (c *Config) UserByUUID(uuid string) *User { return c.userIndex[uuid] }
 
 // ProviderByName 按名称取 provider；重复配置只取第一个（书写顺序）。
 func (c *Config) ProviderByName(name string) (Provider, bool) {
+	names := c.ProviderNames()
 	if name == "" {
-		if len(c.providerOrder) == 0 {
+		if len(names) == 0 {
 			return Provider{}, false
 		}
-		name = c.providerOrder[0]
+		name = names[0]
 	}
-	if seen := map[string]bool{}; true {
-		for _, n := range c.providerOrder {
-			if seen[n] {
-				continue
-			}
-			seen[n] = true
-			if n == name {
-				p, ok := c.Providers[n]
-				return p, ok
-			}
+	for _, n := range names {
+		if n == name {
+			p, ok := c.Providers[n]
+			return p, ok
 		}
 	}
-	p, ok := c.Providers[name]
-	return p, ok
+	return Provider{}, false
 }
 
 // ProviderNames 返回 providers 的书写顺序（重复名已去重，只保留第一个）。
@@ -679,7 +686,8 @@ func (c *Config) EffectiveLimits(u *User) map[string]float64 {
 	return c.LimitsPerUser
 }
 
-// objectKeyOrder 提取 JSON 对象中键的书写顺序（用于保持 pricing 顺序）。
+// objectKeyOrder 提取 JSON 对象中键的书写顺序。调用方负责按“只取第一个”
+// 规则去重；这里保留原始顺序以便诊断和展示。
 func objectKeyOrder(data []byte, key string) []string {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -705,7 +713,7 @@ func objectKeyOrder(data []byte, key string) []string {
 		var v json.RawMessage
 		_ = dec.Decode(&v)
 	}
-	return out
+	return dedupeKeepFirst(out)
 }
 
 // objectRawPricing 提取 pricing 对象中每个数值字段的原始 JSON 文本。
@@ -731,6 +739,11 @@ func objectRawPricing(data []byte) map[string]RawPrice {
 			break
 		}
 		ks, _ := k.(string)
+		if _, exists := out[ks]; exists {
+			var skipped json.RawMessage
+			_ = dec.Decode(&skipped)
+			continue
+		}
 		var obj json.RawMessage
 		if err := dec.Decode(&obj); err != nil {
 			continue
@@ -740,16 +753,21 @@ func objectRawPricing(data []byte) map[string]RawPrice {
 			continue
 		}
 		rp := RawPrice{}
+		fieldSeen := map[string]bool{}
 		for od.More() {
 			field, err := od.Token()
 			if err != nil {
 				break
 			}
 			fs, _ := field.(string)
+			if fieldSeen[fs] {
+				continue
+			}
 			var val json.RawMessage
 			if err := od.Decode(&val); err != nil {
 				continue
 			}
+			fieldSeen[fs] = true
 			s := strings.TrimSpace(string(val))
 			switch fs {
 			case "input_per_million":

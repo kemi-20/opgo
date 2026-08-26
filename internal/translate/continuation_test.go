@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,25 @@ func TestPreludeContinuationGuard(t *testing.T) {
 	reset.Messages = append(reset.Messages, Message{Role: "user", Text: "新问题"})
 	if !shouldContinueAfterPrelude("现在让我读取新问题。", reset) {
 		t.Fatal("新的用户轮次应重置过渡句救援次数")
+	}
+}
+
+func TestPreludeContinuationCountsAcrossToolResults(t *testing.T) {
+	meta := &Request{Tools: []Tool{{Type: "function", Name: "probe", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	meta.Messages = append(meta.Messages, Message{Role: "user", Text: "Run the batch."})
+	for i := 1; i <= 3; i++ {
+		meta.Messages = append(meta.Messages,
+			Message{Role: "assistant", Text: fmt.Sprintf("现在让我读取第%d项。", i)},
+			Message{Role: "tool", ToolCallID: fmt.Sprintf("call_%d", i), Text: "result"},
+		)
+	}
+	if shouldContinueAfterPrelude("现在让我读取第四项。", meta) {
+		t.Fatal("同一用户轮次的救援次数超过三次")
+	}
+
+	meta.Messages = append(meta.Messages, Message{Role: "user", Text: "新问题"})
+	if !shouldContinueAfterPrelude("现在让我读取新问题。", meta) {
+		t.Fatal("新的用户消息应重置救援计数")
 	}
 }
 

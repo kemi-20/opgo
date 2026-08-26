@@ -295,6 +295,39 @@ func TestForwardRoutesModelProvider(t *testing.T) {
 	}
 }
 
+// TestAnthropicStreamUsageDoesNotDoubleCountStartPlaceholder 验证 Anthropic 流式
+// 计费：message_start 的 output_tokens 是起始占位（可为 1），message_delta 是累计
+// 终值。数据库必须按终值 N 计费，而不是 1+N。
+func TestAnthropicStreamUsageDoesNotDoubleCountStartPlaceholder(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}`+"\n\n")
+		fmt.Fprint(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`+"\n\n")
+		fmt.Fprint(w, `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}`+"\n\n")
+		fmt.Fprint(w, `data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	p, db := newTestProxy(t, upstream.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"deepseek-v4-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`
+	status, respBody, _ := doReq(t, srv, http.MethodPost, "/v1/messages", testUser1, body)
+	if status != 200 || !strings.Contains(respBody, "message_stop") {
+		t.Fatalf("status=%d body=%s", status, respBody)
+	}
+	sum, err := db.UserWindowSum("uuid-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 测试价格是 0.44/0.88：100 input * 0.44/1M + 50 output * 0.88/1M = 2800 微元。
+	// 若把 start 占位 output_tokens=1 与 delta 终值相加，会得到 2888 微元。
+	if sum != 2800 {
+		t.Fatalf("sum=%d, want 2800 (test price 0.44/0.88; got %d)", sum, sum)
+	}
+}
+
 func TestForwardStream(t *testing.T) {
 	fu := &fakeUpstream{stream: true}
 	up := httptest.NewServer(fu.handler())
@@ -816,6 +849,27 @@ func TestHealthz(t *testing.T) {
 	status, body, _ := doReq(t, srv, "GET", "/healthz", "", "")
 	if status != 200 || !strings.Contains(body, "ok") {
 		t.Errorf("status = %d: %s", status, body)
+	}
+}
+
+func TestRateLimiterSweepsUnusedKeys(t *testing.T) {
+	rl := newRateLimiter()
+	now := time.Unix(1787370000, 0)
+	rl.lastSweep = now
+	if !rl.allow("old", 10, now) || !rl.allow("stale", 10, now.Add(30*time.Second)) {
+		t.Fatal("初始请求不应限流")
+	}
+	if len(rl.hits) != 2 {
+		t.Fatalf("hits=%d, want 2", len(rl.hits))
+	}
+	if !rl.allow("new", 10, now.Add(91*time.Second)) {
+		t.Fatal("新 key 不应限流")
+	}
+	if len(rl.hits) != 1 {
+		t.Fatalf("hits=%#v, want only new", rl.hits)
+	}
+	if _, ok := rl.hits["new"]; !ok {
+		t.Fatal("活跃 key 不应被清理")
 	}
 }
 
@@ -1549,6 +1603,29 @@ func TestTransformStreamRecordsUsage(t *testing.T) {
 	}
 	if sum != 2663 {
 		t.Errorf("sum = %d, want 2663（90*0.14 + 10*0.0028 + 50*0.28 = 2663 微元）", sum)
+	}
+}
+
+// TestTransformAnthropicUsesConfiguredMaxTokens 验证客户端省略 max_tokens 时，
+// 转换后的 Anthropic 请求使用 pricing.max_output_tokens 兜底，而不是缺字段。
+func TestTransformAnthropicUsesConfiguredMaxTokens(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["deepseek-v4-flash"]
+		pr.Transformation = "anthropic"
+		c.Pricing["deepseek-v4-flash"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	if status, respBody, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1, body); status != 200 {
+		t.Fatalf("status=%d body=%s", status, respBody)
+	}
+	if !strings.Contains(string(fu.lastBody), `"max_tokens":384000`) {
+		t.Fatalf("upstream body missing configured max_tokens: %s", fu.lastBody)
 	}
 }
 

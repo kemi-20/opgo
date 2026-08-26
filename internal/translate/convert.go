@@ -16,13 +16,30 @@ func ParseRequest(from Format, raw []byte) (*Request, error) {
 	}
 }
 
-func ConvertRequest(from, to Format, raw []byte) ([]byte, error) {
+// RequestOption 可在转换前调整解析出的规范化请求。
+type RequestOption func(*Request)
+
+// WithAnthropicMaxTokensFallback 在客户端未提供 max_tokens 时注入模型配置的
+// 单次输出上限。仅对目标协议为 Anthropic 的转换生效。
+func WithAnthropicMaxTokensFallback(maxTokens int) RequestOption {
+	return func(req *Request) {
+		if maxTokens > 0 && req.MaxTokens == nil {
+			value := maxTokens
+			req.MaxTokens = &value
+		}
+	}
+}
+
+func ConvertRequest(from, to Format, raw []byte, opts ...RequestOption) ([]byte, error) {
 	if from == to {
 		return raw, nil
 	}
 	req, err := ParseRequest(from, raw)
 	if err != nil {
 		return nil, err
+	}
+	for _, opt := range opts {
+		opt(req)
 	}
 	// 计费必需：转换模式下请求标准 usage（上游响应需带 usage 才能按 token 计费）。
 	// →completions 流式注入 stream_options.include_usage；Responses 默认在响应对象/
@@ -70,8 +87,8 @@ func ConvertResponse(to, from Format, raw []byte) ([]byte, error) {
 	return raw, nil
 }
 
-// ConvertResponseMeta ͬ ConvertResponse�����������Ŀ���ʽ��Ӧʱ�ṩԭʼ����ġ�None
-// ��Ԫ�أ��Ա�ת��ʱ�ھ����Ŀ���ʽ�ϲ�ȫ�ֶ��루temperature/tools/tool_choice �ȣ���
+// ConvertResponseMeta 与 ConvertResponse 相同；转换到目标格式响应时提供原始请求的元
+// 数据，以便转换后在目标格式上补全字段（temperature/tools/tool_choice 等）。
 func ConvertResponseMeta(meta *Request, to, from Format, raw []byte) ([]byte, error) {
 	if to == from {
 		return raw, nil
