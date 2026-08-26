@@ -283,6 +283,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 	if nb, changed := sanitizeMuseResponsesTools(model, string(upstreamFormat), body); changed {
 		body = nb
 	}
+	if price.ProviderModel != "" {
+		nb, changed, err := replaceUpstreamModel(body, price.ProviderModel)
+		if err != nil {
+			p.log.Warn("上游模型名替换失败", "err", err, "uuid", user.UUID, "model", model)
+			p.writeOpenAIError(w, http.StatusInternalServerError, "model_rewrite_error", "上游模型替换失败")
+			return
+		}
+		if changed {
+			body = nb
+		}
+	}
 	// 按模型 provider 路由；未配置时取第一个/唯一 provider。
 	providerName := ""
 	if hasPrice {
@@ -353,6 +364,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 				"uuid", user.UUID, "model", model, "endpoint", r.URL.Path, "stream", false)
 		}
 	}
+	if price.ProviderModel != "" {
+		// 转换后的响应也可能沿用上游别名；写回前再做一次公开名归一。
+		respBody = maskProviderModelInJSON(respBody, price.ProviderModel, model)
+	}
 	// 仅 2xx 响应做协议转换；错误响应原样透传（保留上游错误语义与状态码）
 	if transformEnabled && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		nb, err := translate.ConvertResponseMeta(reqMeta, srcFormat, dstFormat, respBody)
@@ -362,6 +377,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respBody = nb
+	}
+	if price.ProviderModel != "" {
+		respBody = maskProviderModelInJSON(respBody, price.ProviderModel, model)
 	}
 	copyHeaders(w.Header(), resp.Header)
 	removeHopHeaders(w.Header())
@@ -447,6 +465,9 @@ streamLoop:
 				break streamLoop
 			}
 			line = result.line
+			if price.ProviderModel != "" {
+				line = maskProviderModelInJSON(line, price.ProviderModel, model)
+			}
 		case <-heartbeat:
 			if !discard && !writeChunks([][]byte{[]byte(": keep-alive\n\n")}) {
 				discard = true

@@ -28,14 +28,15 @@
     "1m": 12.00
   },
   "pricing": {
-   "deepseek-v4-flash": {
+    "deepseek-v4-flash": {
       "provider": "go", // 引用 providers 里的名称；重复配置只取第一个
+      "provider_model": "deepseek-v4-flash", // 上游实际请求的模型；留空或同名表示不改模型
       "input_per_million": 0.44, // 谷时价 = 官网 Off-Peak $0.22 的 2 倍；峰时自动加倍（$0.88）
       "output_per_million": 1.32, // 谷时价 = 官网 Off-Peak $0.66 的 2 倍；峰时自动加倍（$2.64）
       "cached_read_per_million": 0.014, // 谷时价 = 官网 Off-Peak $0.007 的 2 倍；峰时自动加倍（$0.028）
       "cached_write_per_million": 0,
       "context_length": 1000000,
-      "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）
+      "max_output_tokens": 384000, // 单次最大输出 token
       "transformation": "", // 空=透传只替换认证
       "modality": "text->text", // 模态：输入->输出（空默认 text->text）
       "tag": "高峰期2x消耗", // 前端定价表模型名右侧显示的标签
@@ -45,66 +46,78 @@
         "windows": [["01:00", "04:00"], ["06:00", "10:00"]] // 峰时时段（UTC，含起不含止）
       }
     },
-   "deepseek-v4-pro": {
-      "provider": "go",
-      "input_per_million": 1.32, // 谷时价 = 官网 Off-Peak $0.66 的 2 倍；峰时自动加倍（$2.64）
-      "output_per_million": 3.96, // 谷时价 = 官网 Off-Peak $1.98 的 2 倍；峰时自动加倍（$7.92）
-      "cached_read_per_million": 0.044, // 谷时价 = 官网 Off-Peak $0.022 的 2 倍；峰时自动加倍（$0.088）
+    "deepseek-v4-flash-vision-exp": {
+      "input_per_million": 0.88,
+      "output_per_million": 2.64,
+      "cached_read_per_million": 0.028,
       "cached_write_per_million": 0,
-      "context_length": 1000000,
-      "max_output_tokens": 384000, // 单次最大输出 token（models.dev opencode-go）
-      "transformation": "", // 空=透传只替换认证
-      "modality": "text->text", // 模态：输入->输出（空默认 text->text）
-      "tag": "高峰期2x消耗", // 前端定价表模型名右侧显示的标签
-      "peak": { // 模型级峰谷时配置（可空=不启用）：峰时自动加倍扣款，config 填谷时价
-        "enabled": true, // 是否启用
-        "multiplier": 2, // 峰时价格倍率
-        "windows": [["01:00", "04:00"], ["06:00", "10:00"]] // 峰时时段（UTC，含起不含止）
+      "modality": "text+image->text",
+      "tag": "高峰期2x消耗",
+      "peak": {
+        "enabled": true,
+        "multiplier": 2,
+        "windows": [["01:00", "04:00"], ["06:00", "10:00"]]
       }
     },
-   "mimo-v2.5": {
-      "provider": "go",
+    "deepseek-v4-pro": {
+      "input_per_million": 2.64,
+      "output_per_million": 7.92,
+      "cached_read_per_million": 0.088,
+      "cached_write_per_million": 0,
+      "modality": "text->text",
+      "tag": "高峰期2x消耗",
+      "peak": {
+        "enabled": true,
+        "multiplier": 2,
+        "windows": [["01:00", "04:00"], ["06:00", "10:00"]]
+      }
+    },
+    "mimo-v2.5": {
       "input_per_million": 0.14,
       "output_per_million": 0.28,
       "cached_read_per_million": 0.0028,
       "cached_write_per_million": 0,
-      "context_length": 1000000,
-      "max_output_tokens": 128000, // 单次最大输出 token（models.dev opencode-go）
-      "transformation": "openai_completions", // 统一转为 chat/completions 发上游（mimo 上游只有 completions 完整）
-      "modality": "text+image+audio+video->text" // 模态：多模态输入->文本
+      "transformation": "openai_completions",
+      "modality": "text+image+audio+video->text"
     },
-   "gpt-5.6-luna": {
-      "provider": "go",
+    "gpt-5.6-luna": {
       "input_per_million": 1.60,
       "output_per_million": 7.20,
       "cached_read_per_million": 0.16,
       "cached_write_per_million": 2.00,
-      "context_length": 1050000,
-      "max_output_tokens": 128000, // 单次最大输出 token（models.dev opencode-go）
-      "transformation": "openai_responses", // 统一转为 Responses 发上游（gpt 原生支持 Responses/web_search）
-      "modality": "text+image->text" // 模态：文本+图片->文本
+      "transformation": "openai_responses",
+      "modality": "text+image->text"
     },
-   "hy3": {
-      "provider": "go",
+    "hy3": {
       "input_per_million": 0.14,
       "output_per_million": 0.58,
       "cached_read_per_million": 0.035,
       "cached_write_per_million": 0,
-      "context_length": 256000,
-      "max_output_tokens": 64000, // 单次最大输出 token（models.dev opencode-go）
-      "transformation": "openai_completions", // 统一转为 chat/completions 发上游
-      "modality": "text->text" // 模态：纯文本
+      "transformation": "openai_completions",
+      "modality": "text->text"
     },
-   "muse-spark-1.2-contributor": {
-      "provider": "go",
+    "muse-spark-1.2-contributor": {
       "input_per_million": 0.10,
       "output_per_million": 0.20,
       "cached_read_per_million": 0.002,
       "cached_write_per_million": 0,
-      "context_length": 1048576,
-      "max_output_tokens": 131072, // 单次最大输出 token（models.dev opencode-go）
-      "transformation": "openai_responses", // 统一转为 Responses 发上游
-      "modality": "text+image+audio->text" // 模态：文本+图片+音频->文本
+      "transformation": "openai_responses",
+      "modality": "text+image+audio->text"
+    },
+    "minimax-m3": {
+      "input_per_million": 0.30,
+      "output_per_million": 1.20,
+      "cached_read_per_million": 0.06,
+      "cached_write_per_million": 0,
+      "modality": "text+image+video->text"
+    },
+    "longcat-2.0": {
+      "input_per_million": 0.30,
+      "output_per_million": 1.20,
+      "cached_read_per_million": 0.006,
+      "cached_write_per_million": 0,
+      "transformation": "openai_completions",
+      "modality": "text->text"
     },
     "x-preview-f-free": {
       "provider": "zen",
@@ -112,10 +125,8 @@
       "output_per_million": 0,
       "cached_read_per_million": 0,
       "cached_write_per_million": 0,
-      "context_length": 1000000,
-      "max_output_tokens": 131072, // 单次最大输出 token（models.dev opencode-zen）
-      "transformation": "openai_completions", // 统一转为 chat/completions 发上游
-      "modality": "text+image->text" // 模态：文本+图片->文本
+      "transformation": "openai_completions",
+      "modality": "text+image->text"
     }
   },
   "users": [

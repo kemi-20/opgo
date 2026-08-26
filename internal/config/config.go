@@ -39,6 +39,9 @@ type ModelPricing struct {
 	Modality string `json:"modality"`
 	// Provider 引用顶层 providers 中的名称；为空时使用唯一/第一个 provider。
 	Provider string `json:"provider"`
+	// ProviderModel 发往上游时替换成的模型名；为空表示继续使用公开模型名。
+	// 该别名不出现在 /v1/models，也不能作为客户端请求的模型名。
+	ProviderModel string `json:"provider_model,omitempty"`
 }
 
 // ModalityInfo 解析后的模态信息。
@@ -544,6 +547,13 @@ func (c *Config) validate() error {
 	for name, p := range c.Pricing {
 		if p.InputPerMillion < 0 || p.OutputPerMillion < 0 || p.CachedReadPerMillion < 0 || p.CachedWritePerMillion < 0 {
 			return fmt.Errorf("pricing[%s] 价格不能为负数", name)
+		}
+		p.ProviderModel = strings.TrimSpace(p.ProviderModel)
+		if p.ProviderModel != "" && p.ProviderModel != name {
+			if _, conflict := c.Pricing[p.ProviderModel]; conflict {
+				return fmt.Errorf("pricing[%s].provider_model 不能与公开模型同名: %s", name, p.ProviderModel)
+			}
+			c.Pricing[name] = p
 		}
 		if p.Provider != "" {
 			found := false

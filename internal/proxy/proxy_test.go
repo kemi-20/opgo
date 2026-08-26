@@ -1629,6 +1629,79 @@ func TestTransformAnthropicUsesConfiguredMaxTokens(t *testing.T) {
 	}
 }
 
+// TestProviderModelRewritesUpstreamOnly 验证 provider_model 只替换发往上游的
+// model；公开名仍用于认证后的模型校验、计费和数据库记录，且不能被直接请求。
+func TestProviderModelRewritesUpstreamOnly(t *testing.T) {
+	fu := &fakeUpstream{}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["deepseek-v4-flash"]
+		pr.ProviderModel = "upstream-deepseek-hidden"
+		c.Pricing["deepseek-v4-flash"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	if status, respBody, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1, body); status != 200 {
+		t.Fatalf("public model status=%d body=%s", status, respBody)
+	}
+	if !strings.Contains(string(fu.lastBody), `"model":"upstream-deepseek-hidden"`) ||
+		strings.Contains(string(fu.lastBody), `"model":"deepseek-v4-flash"`) {
+		t.Fatalf("upstream body not rewritten: %s", fu.lastBody)
+	}
+	sum, err := db.UserWindowSum("uuid-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum == 0 {
+		t.Fatal("public model was not billed")
+	}
+
+	modelsResp := httptest.NewServer(p)
+	defer modelsResp.Close()
+	status, modelsBody, _ := doReq(t, modelsResp, http.MethodGet, "/v1/models", testUser1, "")
+	if status != 200 || strings.Contains(modelsBody, "upstream-deepseek-hidden") {
+		t.Fatalf("models status=%d body=%s; alias must stay hidden", status, modelsBody)
+	}
+	if status, body, _ := doReq(t, srv, http.MethodPost, "/v1/chat/completions", testUser1,
+		`{"model":"upstream-deepseek-hidden","messages":[{"role":"user","content":"hi"}]}`); status != 403 {
+		t.Fatalf("direct alias status=%d body=%s, want 403", status, body)
+	}
+}
+
+func TestProviderModelResponseAndStreamAreMasked(t *testing.T) {
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &req)
+		gotModel = req.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"resp-hidden","object":"response","model":"upstream-deepseek-hidden","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}`)
+	}))
+	defer upstream.Close()
+	p, _ := newTestProxy(t, upstream.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) {
+		pr := c.Pricing["deepseek-v4-flash"]
+		pr.ProviderModel = "upstream-deepseek-hidden"
+		c.Pricing["deepseek-v4-flash"] = pr
+	})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	body := `{"model":"deepseek-v4-flash","input":"hi"}`
+	status, respBody, hdr := doReq(t, srv, http.MethodPost, "/v1/responses", testUser1, body)
+	if status != 200 || strings.Contains(respBody, "upstream-deepseek-hidden") || !strings.Contains(respBody, `"model":"deepseek-v4-flash"`) {
+		t.Fatalf("status=%d resp=%s headers=%v", status, respBody, hdr)
+	}
+	if gotModel != "upstream-deepseek-hidden" {
+		t.Fatalf("upstream model=%q", gotModel)
+	}
+}
+
 // TestTransformStreamUsageAfterClientDisconnect 模拟 Claude Code 行为：流式客户端
 // 在收到部分内容后提前断开连接（usage 事件在上游流末尾）。opgo 必须继续读上游
 // 解析 usage 并记账，不能因写失败跳过计费。

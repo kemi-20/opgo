@@ -5,7 +5,7 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
 - Muse 原生搜索兼容：仅对 `muse-spark-1.2-contributor` 发往 Responses 的 `web_search` 工具强制删除上游不支持的 `search_content_types`；模型名、协议、工具类型或字段任一不匹配时逐字节不修改，且无需配置
-- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.2-contributor 定价）
+- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-flash-vision-exp、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.2-contributor、minimax-m3、longcat-2.0、x-preview-f-free 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
 - 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
@@ -61,6 +61,7 @@ go build -o opgo.exe .
 | listen | 监听地址，默认 :3003 |
 | providers | 多上游配置：`名称 = { url, key }`；同名 provider 重复时只取第一个（必填；旧版单上游字段自动兼容） |
 | pricing.<model>.provider | 模型引用 providers 名称；留空自动使用第一个 provider，引用不存在名称时配置校验失败 |
+| pricing.<model>.provider_model | 上游实际请求的模型名；留空或同名表示不改模型。该别名不会出现在模型列表中，也不能被客户端直接请求 |
 | admin_password | Web 管理员密码（必填） |
 | balance_provider | 余额接口使用哪个 provider 的 key；留空使用第一个 provider |
 | balance_url | 覆盖余额接口 URL；key 仍来自 balance_provider 或第一个 provider |
@@ -87,6 +88,7 @@ go build -o opgo.exe .
 ```
 
 - 模型 `provider` 留空时自动绑定第一个 provider；引用不存在名称会在配置校验时失败。
+- `provider_model` 只影响发往上游的请求体；计费、限额、`/v1/models` 和数据库仍使用 config 里的公开模型名。除自身外，别名不能与任何公开模型名重复。
 - 同名 `providers` 条目重复时只取第一个；同名模型重复时同样只取第一个。
 - `balance_provider` 指定余额接口使用哪个 provider 的 key；留空使用第一个 provider。`balance_url` 可覆盖余额接口 URL，但 key 仍来自所选 provider。
 - 兼容旧版单上游：只有 `upstream_base` / `master_key` 的配置会自动转换成名为 `default` 的 provider。
@@ -112,7 +114,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 - 峰时窗口：01:00-04:00 与 06:00-10:00（UTC），其他时间为谷时；可自行修改 windows。
 - 未配置 `peak` 的模型始终按 config 价格计费（无峰谷）。
 - 可 `"enabled": false` 单独关闭某模型的峰谷。
-- 当前示例仅 DeepSeek 双模型配置了 peak：deepseek-v4-flash 谷时 $0.44/$1.32/$0.014，峰时自动按 $0.88/$2.64/$0.028 计费（官网 Off-Peak 价的 2 倍，峰时再翻倍）。
+- 当前示例 DeepSeek 三模型配置了 peak：deepseek-v4-flash 谷时 $0.44/$1.32/$0.014，峰时自动按 $0.88/$2.64/$0.028 计费；deepseek-v4-flash-vision-exp 谷时 $0.88/$2.64/$0.028，峰时自动按 $1.76/$5.28/$0.056 计费；deepseek-v4-pro 谷时 $2.64/$7.92/$0.088，峰时自动按 $5.28/$15.84/$0.176 计费。
 
 ## 模型模态（modality）
 
@@ -152,10 +154,14 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | 模型 | modality |
 |---|---|
 | deepseek-v4-flash / deepseek-v4-pro | `text->text`（默认） |
+| deepseek-v4-flash-vision-exp | `text+image->text` |
 | mimo-v2.5 | `text+image+audio+video->text` |
 | gpt-5.6-luna | `text+image->text` |
 | hy3 | `text->text`（纯文本） |
 | muse-spark-1.2-contributor | `text+image+audio->text` |
+| minimax-m3 | `text+image+video->text` |
+| longcat-2.0 | `text->text`（纯文本） |
+| x-preview-f-free | `text+image->text` |
 
 `GET /v1/models` 会把 modality 自动拆为三个字段返回：
 
@@ -200,11 +206,14 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 
 | 模型 | transformation | 原因 |
 |---|---|---|
-| deepseek-v4-flash / deepseek-v4-pro | （留空透传） | 上游原生端点完整，直接透传只替换认证 |
+| deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro | （留空透传） | 上游原生端点完整，直接透传只替换认证 |
 | mimo-v2.5 | `openai_completions` | 上游只有 chat/completions 完整（Responses 不稳定、messages 无思考），统一转 completions |
 | hy3 | `openai_completions` | 统一转 chat/completions 发上游（与 mimo 同策略） |
+| longcat-2.0 | `openai_completions` | 上游官方规范端点为 Chat Completions，统一转 completions |
+| x-preview-f-free | `openai_completions` | 上游官方规范端点为 Chat Completions，统一转 completions |
 | gpt-5.6-luna | `openai_responses` | 上游原生支持 Responses（含 web_search），统一转 responses |
 | muse-spark-1.2-contributor | （留空透传） | 上游官方规范端点为 Responses（/v1/responses），原生三端点路由均在；Contributor 模型需在 Coding Plan workspace 显式开启数据收集 opt-in，未开启时上游返回 403 DataPolicyError |
+| minimax-m3 | （留空透传） | 上游官方规范端点为 Anthropic Messages（/v1/messages），保持原样透传 |
 
 客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。
 

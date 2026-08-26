@@ -249,6 +249,10 @@ func TestValidation(t *testing.T) {
 		{"master_key 为空", func(s string) string { return strings.Replace(s, "sk-REPLACE_ME", "", 1) }},
 		{"admin_password 为空", func(s string) string { return strings.Replace(s, "ADMIN_REPLACE_ME", "", 1) }},
 		{"upstream_base 非法", func(s string) string { return strings.Replace(s, "https://PROVIDER_HOST/v1", "not-a-url", 1) }},
+		{"provider_model 与公开模型冲突", func(s string) string {
+			return strings.Replace(s, `"deepseek-v4-flash": {`,
+				`"deepseek-v4-flash": {"provider_model": "deepseek-v4-pro",`, 1)
+		}},
 		{"重复 uuid", func(s string) string { return strings.Replace(s, "uuid-2", "uuid-1", 1) }},
 		{"重复 key", func(s string) string { return strings.Replace(s, "sk-u2", "sk-u1", 1) }},
 		{"负限额", func(s string) string { return strings.Replace(s, "\"5h\": 2.4", "\"5h\": -1", 1) }},
