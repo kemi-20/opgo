@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestSanitizeMuseResponsesToolsIsSurgical(t *testing.T) {
   "tool_choice": "auto"
 }`)
 
-	out, changed := sanitizeMuseResponsesTools(museSparkModel, "openai_responses", raw)
+	out, changed := sanitizeMuseResponsesTools("muse-spark-1.2-contributor", "openai_responses", raw)
 	if !changed {
 		t.Fatal("应删除 Muse web_search.search_content_types")
 	}
@@ -62,7 +63,7 @@ func TestSanitizeMuseResponsesToolsDoesNotTouchOtherTraffic(t *testing.T) {
 		format string
 	}{
 		{"other model", "gpt-5.6-luna", "openai_responses"},
-		{"other wire format", museSparkModel, "openai_completions"},
+		{"other wire format", "muse-spark-1.2-contributor", "openai_completions"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,7 +77,7 @@ func TestSanitizeMuseResponsesToolsDoesNotTouchOtherTraffic(t *testing.T) {
 
 func TestSanitizeMuseResponsesToolsNoTargetFieldIsByteExact(t *testing.T) {
 	raw := []byte(` { "model":"muse-spark-1.2-contributor", "tools" : [ { "type" : "web_search", "external_web_access" : false } ] } `)
-	out, changed := sanitizeMuseResponsesTools(museSparkModel, "openai_responses", raw)
+	out, changed := sanitizeMuseResponsesTools("muse-spark-1.2-contributor", "openai_responses", raw)
 	if changed || string(out) != string(raw) {
 		t.Fatalf("无目标字段时必须逐字节不变：changed=%v out=%q", changed, out)
 	}
@@ -91,7 +92,7 @@ func TestMuseFieldRemovalHandlesEveryObjectPosition(t *testing.T) {
 	}
 	for _, tool := range tests {
 		raw := []byte(`{"model":"muse-spark-1.2-contributor","tools":[` + tool + `]}`)
-		out, changed := sanitizeMuseResponsesTools(museSparkModel, "openai_responses", raw)
+		out, changed := sanitizeMuseResponsesTools("muse-spark-1.2-contributor", "openai_responses", raw)
 		if !changed || !json.Valid(out) {
 			t.Fatalf("未正确清理 %s：changed=%v out=%s", tool, changed, out)
 		}
@@ -111,7 +112,7 @@ func TestMuseFieldRemovalHandlesUnicodeEscapedKeys(t *testing.T) {
 	// JSON 的 Unicode 转义在源字节中不包含实际双引号；扫描器应完整越过，
 	// json.Unmarshal key 后仍能精准识别 tools/type/目标字段。
 	raw := []byte(`{"t\u006f\u006fls":[{"t\u0079pe":"web_search","search\u005fcontent_types":["text"],"keep":"x"}]}`)
-	out, changed := sanitizeMuseResponsesTools(museSparkModel, "openai_responses", raw)
+		out, changed := sanitizeMuseResponsesTools("muse-spark-1.2-contributor", "openai_responses", raw)
 	if !changed || !json.Valid(out) {
 		t.Fatalf("Unicode 转义键未正确处理: changed=%v out=%s", changed, out)
 	}
@@ -126,6 +127,68 @@ func TestMuseFieldRemovalHandlesUnicodeEscapedKeys(t *testing.T) {
 	}
 	if _, exists := envelope.Tools[0]["keep"]; !exists {
 		t.Fatalf("无关字段被误删: %s", out)
+	}
+}
+
+func TestSanitizeMuseResponsesToolsMatchesMuseSparkPrefix(t *testing.T) {
+	// 前缀匹配应覆盖 1.2 与 1.3，并对非 muse-spark 模型保持原样。
+	matching := []struct {
+		name, model string
+	}{
+		{"muse 1.2 contributor", "muse-spark-1.2-contributor"},
+		{"muse 1.3 preview", "muse-spark-1.3-preview"},
+		{"muse future major", "muse-spark-2.0"},
+	}
+	raw := []byte(`{"model":"PLACEHOLDER","tools":[{"type":"web_search","external_web_access":false,"search_content_types":["text"]}]}`)
+	for _, tc := range matching {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(strings.Replace(string(raw), "PLACEHOLDER", tc.model, 1))
+			out, changed := sanitizeMuseResponsesTools(tc.model, "openai_responses", body)
+			if !changed {
+				t.Fatalf("%s 应被识别为 Muse 模型", tc.model)
+			}
+			var envelope struct {
+				Tools []map[string]json.RawMessage `json:"tools"`
+			}
+			if err := json.Unmarshal(out, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := envelope.Tools[0]["search_content_types"]; exists {
+				t.Fatalf("%s 的目标字段未被删除: %s", tc.model, out)
+			}
+		})
+	}
+
+	nonMatching := []string{
+		"muse",
+		"muses",
+		"muse-sparkling",
+		"gpt-5.6-luna",
+		"deepseek-v4-flash",
+		"",
+	}
+	for _, model := range nonMatching {
+		t.Run("not_match/"+model, func(t *testing.T) {
+			out, changed := sanitizeMuseResponsesTools(model, "openai_responses", raw)
+			if changed || string(out) != string(raw) {
+				t.Fatalf("非 Muse 前缀模型必须原样透传：model=%q changed=%v", model, changed)
+			}
+		})
+	}
+}
+
+func TestShouldSendSSEHeartbeatAcceptsMuseSparkPrefix(t *testing.T) {
+	if !shouldSendSSEHeartbeat("muse-spark-1.2-contributor") {
+		t.Fatal("muse-spark-1.2-contributor 应启用 SSE 心跳")
+	}
+	if !shouldSendSSEHeartbeat("muse-spark-1.3-preview") {
+		t.Fatal("muse-spark-1.3-preview 应启用 SSE 心跳")
+	}
+	if shouldSendSSEHeartbeat("gpt-5.6-luna") {
+		t.Fatal("非 muse-spark 模型不应启用 SSE 心跳")
+	}
+	if shouldSendSSEHeartbeat("") {
+		t.Fatal("空模型不应启用 SSE 心跳")
 	}
 }
 

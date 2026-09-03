@@ -3,9 +3,20 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
-const museSparkModel = "muse-spark-1.2-contributor"
+// museSparkModelPrefix 是 Muse 模型名的统一前缀（含尾随连字符）。Muse 的 Responses 端点
+// 兼容 web_search 但拒收 OpenCodex 附加的 search_content_types 字段。
+// 按 muse-spark- 前缀匹配，自动覆盖 muse-spark-1.2-contributor、
+// muse-spark-1.3-*，以及任何 muse-spark-* 家族未来版本；
+// muse-sparkling、muse、muses 等非同族模型一律不受影响。
+const museSparkModelPrefix = "muse-spark-"
+
+// isMuseSparkModel 判断请求模型是否属于 muse-spark 家族。
+func isMuseSparkModel(model string) bool {
+	return strings.HasPrefix(model, museSparkModelPrefix)
+}
 
 // sanitizeMuseResponsesTools applies the one compatibility exception required by
 // Muse's native Responses endpoint. OpenCodex currently adds
@@ -13,7 +24,7 @@ const museSparkModel = "muse-spark-1.2-contributor"
 // rejects that field. The model name, upstream wire format, tool type and field
 // must all match; every other request is returned byte-for-byte unchanged.
 func sanitizeMuseResponsesTools(model string, upstreamFormat string, body []byte) ([]byte, bool) {
-	if model != museSparkModel || upstreamFormat != "openai_responses" {
+	if !isMuseSparkModel(model) || upstreamFormat != "openai_responses" {
 		return body, false
 	}
 

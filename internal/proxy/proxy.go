@@ -527,7 +527,7 @@ streamLoop:
 }
 
 func shouldSendSSEHeartbeat(model string) bool {
-	return model == "muse-spark-1.2-contributor"
+	return isMuseSparkModel(model)
 }
 
 // mergeUsage 合并流式过程中出现的多段 usage。OpenAI/Responses 的 usage 是

@@ -1873,7 +1873,9 @@ func TestMuseResponsesStreamKeepsSilentConnectionAlive(t *testing.T) {
 func TestSSEHeartbeatIsSurgicalToMuse(t *testing.T) {
 	tests := map[string]bool{
 		"muse-spark-1.2-contributor": true,
-		"muse-spark-1.2":             false,
+		"muse-spark-1.3-preview":     true,
+		"muse-sparkling":             false,
+		"muse":                       false,
 		"mimo-v2.5":                  false,
 		"hy3":                        false,
 		"deepseek-v4-flash":          false,
