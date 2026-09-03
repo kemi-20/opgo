@@ -90,7 +90,7 @@ systemctl enable --now "$SERVICE"
 
 echo ""
 echo "安装完成。首次启动会自动生成示例配置 /opt/opgo/config.jsonc，"
-echo "请编辑该文件（upstream_base / master_key / admin_password / users）后执行："
+echo "请编辑该文件（providers / admin_password / users）后执行："
 echo "  sudo systemctl restart opgo"
 echo "查看日志："
 echo "  journalctl -u opgo -f"

@@ -55,7 +55,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 可热更新的配置：后台轮询配置文件，变更（users/pricing/limits/master_key 等）即时生效；
+	// 可热更新的配置：后台轮询配置文件，变更（users/pricing/limits/providers 等）即时生效；
 	// 仅 listen 变更需重启，检测到时会记录警告。
 	mgr := config.NewManager(cfg, *cfgPath, exampleConfig, logger)
 	mgr.Watch(ctx, time.Second)

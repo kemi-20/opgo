@@ -258,7 +258,7 @@ func Load(path string, example []byte, log *slog.Logger) (*Config, error) {
 		return nil, fmt.Errorf("自动创建配置文件失败: %w", err)
 	}
 	log.Warn("未找到配置文件，已自动创建示例配置", "path", path)
-	log.Warn("请修改 upstream_base / master_key / admin_password / users 后重启生效")
+	log.Warn("请修改 providers / admin_password / users 后重启生效")
 	return Parse(example)
 }
 

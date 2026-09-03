@@ -4,8 +4,8 @@ opgo 是一个把 Coding Plan 套餐共享给多人的轻量网关：成员请�
 
 ## 功能
 - 透明反代：仅替换认证头，请求体原样转发
-- Muse 原生搜索兼容：仅对 `muse-spark-1.2-contributor` 发往 Responses 的 `web_search` 工具强制删除上游不支持的 `search_content_types`；模型名、协议、工具类型或字段任一不匹配时逐字节不修改，且无需配置
-- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-flash-vision-exp、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.2-contributor、minimax-m3、longcat-2.0、x-preview-f-free 定价）
+- Muse 原生搜索兼容：仅对 `muse-spark-*` 家族模型发往 Responses 的 `web_search` 工具强制删除上游不支持的 `search_content_types`；模型名、协议、工具类型或字段任一不匹配时逐字节不修改，且无需配置
+- 按 token 精确计费：模型单价写在 config.jsonc（已预置 deepseek-v4-flash、deepseek-v4-flash-vision-exp、deepseek-v4-pro、mimo-v2.5、gpt-5.6-luna、hy3、muse-spark-1.3-contributor、minimax-m3、longcat-2.0、glm-5.3-flash 定价）
 - 每人（uuid）独立额度：5小时 / 一周 / 31天 滚动窗口，多 key 共享
 - 峰谷时计费：模型级 peak 配置，Peak 时段（UTC 01:00-04:00 与 06:00-10:00）自动加倍扣款，config 中只填谷时价格
 - 模型 tag：pricing 中可配置 tag，Web 定价表模型名右侧显示
@@ -82,7 +82,7 @@ go build -o opgo.exe .
   },
   "pricing": {
     "hy3": { "provider": "go", "input_per_million": 0.14, "output_per_million": 0.58 },
-    "x-preview-f-free": { "provider": "zen", "input_per_million": 0, "output_per_million": 0 }
+    "glm-5.3-flash": { "provider": "go", "input_per_million": 0.30, "output_per_million": 1.00 }
   }
 }
 ```
@@ -158,10 +158,10 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | mimo-v2.5 | `text+image+audio+video->text` |
 | gpt-5.6-luna | `text+image->text` |
 | hy3 | `text->text`（纯文本） |
-| muse-spark-1.2-contributor | `text+image+audio->text` |
+| muse-spark-1.3-contributor | `text+image+audio->text` |
 | minimax-m3 | `text+image+video->text` |
 | longcat-2.0 | `text->text`（纯文本） |
-| x-preview-f-free | `text+image->text` |
+| glm-5.3-flash | `text+image->text` |
 
 `GET /v1/models` 会把 modality 自动拆为三个字段返回：
 
@@ -210,9 +210,9 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | mimo-v2.5 | `openai_completions` | 上游只有 chat/completions 完整（Responses 不稳定、messages 无思考），统一转 completions |
 | hy3 | `openai_completions` | 统一转 chat/completions 发上游（与 mimo 同策略） |
 | longcat-2.0 | `openai_completions` | 上游官方规范端点为 Chat Completions，统一转 completions |
-| x-preview-f-free | `openai_completions` | 上游官方规范端点为 Chat Completions，统一转 completions |
+| glm-5.3-flash | `openai_completions` | 上游官方规范端点为 Chat Completions，统一转 completions |
 | gpt-5.6-luna | `openai_responses` | 上游原生支持 Responses（含 web_search），统一转 responses |
-| muse-spark-1.2-contributor | （留空透传） | 上游官方规范端点为 Responses（/v1/responses），原生三端点路由均在；Contributor 模型需在 Coding Plan workspace 显式开启数据收集 opt-in，未开启时上游返回 403 DataPolicyError |
+| muse-spark-1.3-contributor | （留空透传） | 上游官方规范端点为 Responses（/v1/responses），原生三端点路由均在；Contributor 模型需在 Coding Plan workspace 显式开启数据收集 opt-in，未开启时上游返回 403 DataPolicyError |
 | minimax-m3 | （留空透传） | 上游官方规范端点为 Anthropic Messages（/v1/messages），保持原样透传 |
 
 客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。

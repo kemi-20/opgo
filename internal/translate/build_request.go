@@ -174,7 +174,8 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			if t.Type == "function" {
+			switch t.Type {
+			case "function":
 				fn := map[string]any{"name": t.Name}
 				if t.Description != "" {
 					fn["description"] = t.Description
@@ -183,6 +184,10 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 					fn["parameters"] = json.RawMessage(t.Parameters)
 				}
 				tools = append(tools, map[string]any{"type": "function", "function": fn})
+			case "web_search", "web_search_preview":
+				// OpenAI 原生支持 web_search 类型工具；透传保留搜索能力，
+				// 不得静默丢弃（上游若未开启搜索会返回 400，由调用方感知）。
+				tools = append(tools, map[string]any{"type": t.Type})
 			}
 		}
 		if len(tools) > 0 {
