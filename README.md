@@ -216,7 +216,7 @@ peak 配置在**模型内**（pricing 每个模型条目中），只有配置了
 | muse-spark-1.3-contributor | （留空透传） | 上游官方规范端点为 Responses（/v1/responses），原生三端点路由均在；Contributor 模型需在 Coding Plan workspace 显式开启数据收集 opt-in，未开启时上游返回 403 DataPolicyError |
 | minimax-m3 | （留空透传） | 上游官方规范端点为 Anthropic Messages（/v1/messages），保持原样透传 |
 
-客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整。可按需覆盖各模型的 `transformation`（留空 = 透传）。
+客户端无论用哪种格式访问，opgo 都会自动转换为对应格式转发，保证思考/缓存/usage/工具完整（转 chat/completions 时非 function 搜索工具会被丢弃：实测部分上游不支持 web_search 类型，透传会导致空响应）。可按需覆盖各模型的 `transformation`（留空 = 透传）。
 
 ## 配置热更新
 

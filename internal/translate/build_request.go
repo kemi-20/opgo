@@ -174,8 +174,10 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			switch t.Type {
-			case "function":
+			// 仅透传 function 工具：实测 longcat-2.0 / mimo-v2.5 / hy3 的
+			// chat/completions 上游不支持 web_search 类工具（分别回空流 /
+			// 500 / 空心跳，而非规范 400），透传会导致客户端秒断。
+			if t.Type == "function" {
 				fn := map[string]any{"name": t.Name}
 				if t.Description != "" {
 					fn["description"] = t.Description
@@ -184,10 +186,6 @@ func buildOpenAICompletionsRequest(req *Request) ([]byte, error) {
 					fn["parameters"] = json.RawMessage(t.Parameters)
 				}
 				tools = append(tools, map[string]any{"type": "function", "function": fn})
-			case "web_search", "web_search_preview":
-				// OpenAI 原生支持 web_search 类型工具；透传保留搜索能力，
-				// 不得静默丢弃（上游若未开启搜索会返回 400，由调用方感知）。
-				tools = append(tools, map[string]any{"type": t.Type})
 			}
 		}
 		if len(tools) > 0 {

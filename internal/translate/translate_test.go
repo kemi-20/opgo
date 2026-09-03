@@ -203,9 +203,9 @@ func TestConvertResponsesToCompletionsRequest(t *testing.T) {
 	}
 }
 
-func TestConvertResponsesWebSearchKeptToCompletions(t *testing.T) {
-	// Responses 带 web_search / web_search_preview 工具转 completions 时
-	// 必须按 OpenAI 原生类型保留，不得静默丢弃。
+func TestConvertResponsesWebSearchDroppedForCompletions(t *testing.T) {
+	// Responses 带 web_search 工具转 completions 时必须丢弃
+	// 实测 longcat-2.0 和 mimo-v2.5 和 hy3 的上游不支持该类型
 	raw := []byte(`{
 		"model": "mimo-v2.5",
 		"input": "search news",
@@ -224,16 +224,13 @@ func TestConvertResponsesWebSearchKeptToCompletions(t *testing.T) {
 		} `json:"tools"`
 	}
 	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatalf("转换结果不是合法 JSON: %v\n%s", err, out)
+		t.Fatalf("bad json: %v", err)
 	}
-	if len(obj.Tools) != 3 {
-		t.Fatalf("tools = %d, want 3（搜索工具不得丢失）: %s", len(obj.Tools), out)
+	if len(obj.Tools) != 1 {
+		t.Fatalf("tools = %d want 1", len(obj.Tools))
 	}
-	if obj.Tools[0].Type != "web_search" || obj.Tools[1].Type != "web_search_preview" {
-		t.Fatalf("搜索工具类型未保留: %+v: %s", obj.Tools, out)
-	}
-	if obj.Tools[2].Type != "function" || obj.Tools[2].Function == nil || obj.Tools[2].Function.Name != "bash" {
-		t.Fatalf("function 工具损坏: %+v: %s", obj.Tools, out)
+	if obj.Tools[0].Type != "function" || obj.Tools[0].Function == nil || obj.Tools[0].Function.Name != "bash" {
+		t.Fatalf("function broken")
 	}
 }
 
