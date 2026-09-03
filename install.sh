@@ -86,10 +86,20 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE"
+systemctl enable "$SERVICE"
+
+echo "==> 重启服务使新版本生效（首次安装则为启动服务）"
+systemctl restart "$SERVICE"
+if systemctl is-active --quiet "$SERVICE"; then
+  echo "    服务运行中。"
+else
+  echo "    服务启动失败，查看日志：" >&2
+  echo "      journalctl -u opgo --no-pager -n 50" >&2
+  exit 1
+fi
 
 echo ""
-echo "安装完成。首次启动会自动生成示例配置 /opt/opgo/config.jsonc，"
+echo "安装/更新完成。首次安装会自动生成示例配置 /opt/opgo/config.jsonc，"
 echo "请编辑该文件（providers / admin_password / users）后执行："
 echo "  sudo systemctl restart opgo"
 echo "查看日志："
