@@ -840,6 +840,154 @@ func TestUsageEndpoint(t *testing.T) {
 	}
 }
 
+func TestUsageEndpointPerUser(t *testing.T) {
+	up := newFakeServer(&fakeUpstream{})
+	defer up.Close()
+	tiny := func(cfg *config.Config) {
+		cfg.LimitsPerUser = map[string]float64{"5h": 0.00001, "1w": 6.0, "1m": 12.0}
+	}
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, tiny)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	getRolling := func(key string) (int, string) {
+		t.Helper()
+		status, body, _ := doReq(t, srv, "GET", "/v1/usage", key, "")
+		if status != 200 {
+			t.Fatalf("status = %d: %s", status, body)
+		}
+		var obj struct {
+			Usage map[string]struct {
+				Status  string `json:"status"`
+				Percent int    `json:"percent"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(body), &obj); err != nil {
+			t.Fatal(err)
+		}
+		r := obj.Usage["rolling"]
+		return r.Percent, r.Status
+	}
+
+	// 新库个人 percent 应为 0（假快照总池 rolling 是 5，若看到 5 就是总池视角）。
+	if pct, _ := getRolling(testUser1); pct != 0 {
+		t.Errorf("user1 初始 rolling percent = %d，应为 0（个人视角）", pct)
+	}
+	// user1 一笔真实用量（约 2.7e-5 USD，远超 1e-5 限额）后打满 100 并 exceeded。
+	doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody)
+	if pct, st := getRolling(testUser1); pct != 100 || st != "exceeded" {
+		t.Errorf("user1 用后 rolling percent = %d status = %s，应为 100/exceeded", pct, st)
+	}
+	// user2 不受影响（个人隔离）。
+	if pct, st := getRolling(testUser2); pct != 0 || st != "ok" {
+		t.Errorf("user2 rolling percent = %d status = %s，应为 0/ok", pct, st)
+	}
+}
+
+func TestBalanceEndpointDeepSeek(t *testing.T) {
+	up := newFakeServer(&fakeUpstream{})
+	defer up.Close()
+	p, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, nil)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	getBalance := func(s *httptest.Server, key string) (string, bool, string, string, string) {
+		t.Helper()
+		status, body, _ := doReq(t, s, "GET", "/v1/balance", key, "")
+		if status != 200 {
+			t.Fatalf("status = %d: %s", status, body)
+		}
+		var obj struct {
+			Available bool `json:"is_available"`
+			Infos     []struct {
+				Currency string `json:"currency"`
+				Total    string `json:"total_balance"`
+				Granted  string `json:"granted_balance"`
+				Topped   string `json:"topped_up_balance"`
+			} `json:"balance_infos"`
+		}
+		if err := json.Unmarshal([]byte(body), &obj); err != nil {
+			t.Fatal(err)
+		}
+		if len(obj.Infos) != 1 {
+			t.Fatalf("balance_infos 长度 = %d，应为 1", len(obj.Infos))
+		}
+		bi := obj.Infos[0]
+		return bi.Currency, obj.Available, bi.Total, bi.Granted, bi.Topped
+	}
+
+	// 新库：5h 限额 2.40，全剩，未提额 granted 为 0。
+	cur, avail, total, granted, topped := getBalance(srv, testUser1)
+	if cur != "USD" || !avail || total != "2.40" || granted != "0.00" || topped != "2.40" {
+		t.Errorf("新库余额体不对: %s %v %s %s %s", cur, avail, total, granted, topped)
+	}
+	if _, body, _ := doReq(t, srv, "GET", "/v1/balance", testUser1, ""); strings.Contains(body, testMaster) || strings.Contains(body, testUser1) {
+		t.Error("余额响应泄露 key")
+	}
+
+	// 极小限额下，一笔用量即耗尽：available 由 true 翻转为 false，证明剩余额度真实跟踪用量。
+	tiny := func(cfg *config.Config) {
+		cfg.LimitsPerUser = map[string]float64{"5h": 0.00001, "1w": 6.0, "1m": 12.0}
+	}
+	pt, _ := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, tiny)
+	srvt := httptest.NewServer(pt)
+	defer srvt.Close()
+	if _, avail, _, _, _ := getBalance(srvt, testUser1); !avail {
+		t.Error("耗尽前 is_available 应为 true")
+	}
+	doReq(t, srvt, "POST", "/v1/chat/completions", testUser1, chatBody)
+	if _, avail, total, _, _ := getBalance(srvt, testUser1); avail || total != "0.00" {
+		t.Errorf("耗尽后 available=%v total=%s，应为 false/0.00", avail, total)
+	}
+
+	if status, _, _ := doReq(t, srv, "GET", "/v1/balance", "", ""); status != 401 {
+		t.Errorf("未认证 status = %d", status)
+	}
+	p2, _ := newTestProxy(t, up.URL, &noBalance{}, nil)
+	srv2 := httptest.NewServer(p2)
+	defer srv2.Close()
+	if status, _, _ := doReq(t, srv2, "GET", "/v1/balance", testUser1, ""); status != 503 {
+		t.Errorf("未同步 status = %d", status)
+	}
+}
+
+func TestBalanceBoostSplit(t *testing.T) {
+	fu := &fakeUpstream{zeroUsage: true}
+	up := httptest.NewServer(fu.handler())
+	defer up.Close()
+	p, db := newTestProxy(t, up.URL, &fixedBalance{snap: okSnapshot()}, func(c *config.Config) { c.Boost = boostCfg() })
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// 用到 0.95L 触发一次提额（2.4→3.6），余额应拆分为套餐内剩余 0.12 + 提额部分剩余 1.20。
+	seedUnits(t, db, "uuid-1", 2.4*0.95)
+	if st, body, _ := doReq(t, srv, "POST", "/v1/chat/completions", testUser1, chatBody); st != 200 {
+		t.Fatalf("0.95L status = %d: %s, want 200", st, body)
+	}
+	status, body, _ := doReq(t, srv, "GET", "/v1/balance", testUser1, "")
+	if status != 200 {
+		t.Fatalf("status = %d: %s", status, body)
+	}
+	var obj struct {
+		Available bool `json:"is_available"`
+		Infos     []struct {
+			Total   string `json:"total_balance"`
+			Granted string `json:"granted_balance"`
+			Topped  string `json:"topped_up_balance"`
+		} `json:"balance_infos"`
+	}
+	if err := json.Unmarshal([]byte(body), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if len(obj.Infos) != 1 {
+		t.Fatalf("balance_infos 长度 = %d，应为 1", len(obj.Infos))
+	}
+	bi := obj.Infos[0]
+	if !obj.Available || bi.Total != "1.32" || bi.Granted != "1.20" || bi.Topped != "0.12" {
+		t.Errorf("提额后余额拆分不对: available=%v total=%s granted=%s topped=%s，应为 true/1.32/1.20/0.12", obj.Available, bi.Total, bi.Granted, bi.Topped)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	up := newFakeServer(&fakeUpstream{})
 	defer up.Close()

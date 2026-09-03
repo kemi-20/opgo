@@ -284,6 +284,11 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 				}
 			}
 		}
+		// 个人视角断言：临时库无用量，rolling percent 应为 0（假快照总池是 5，
+		// 若看到 5 说明误把总池当成了个人）。
+		if pct, _ := obj.Usage.Rolling["percent"].(float64); pct != 0 {
+			return fmt.Errorf("/v1/usage 应为个人视角（新库 percent 应为 0），实际 %v", pct)
+		}
 		return nil
 	})
 	check("v1/usage 未认证 → 401 无泄露", func() error {
@@ -292,6 +297,42 @@ func Run(cfg *config.Config, indexHTML []byte, log *slog.Logger) error {
 			return fmt.Errorf("状态 %d", status)
 		}
 		return assertNoKeys("/v1/usage-401", body, hdr)
+	})
+	check("v1/balance DeepSeek 格式无泄露", func() error {
+		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/balance", "Bearer "+userKey, "")
+		if status != 200 {
+			return fmt.Errorf("状态 %d: %s", status, body)
+		}
+		if err := assertNoKeys("/v1/balance", body, hdr); err != nil {
+			return err
+		}
+		var obj struct {
+			Available bool `json:"is_available"`
+			Infos     []struct {
+				Currency string `json:"currency"`
+				Total    string `json:"total_balance"`
+				Granted  string `json:"granted_balance"`
+				Topped   string `json:"topped_up_balance"`
+			} `json:"balance_infos"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return fmt.Errorf("/v1/balance 响应不是 JSON: %w", err)
+		}
+		if len(obj.Infos) != 1 {
+			return fmt.Errorf("/v1/balance balance_infos 长度 = %d，应为 1", len(obj.Infos))
+		}
+		bi := obj.Infos[0]
+		if bi.Currency != "USD" || bi.Total == "" || bi.Granted == "" || bi.Topped == "" {
+			return fmt.Errorf("/v1/balance 金额字段缺失: %+v", bi)
+		}
+		return nil
+	})
+	check("v1/balance 未认证 → 401 无泄露", func() error {
+		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/balance", "", "")
+		if status != 401 {
+			return fmt.Errorf("状态 %d", status)
+		}
+		return assertNoKeys("/v1/balance-401", body, hdr)
 	})
 	check("models 未认证 → 401 无泄露", func() error {
 		status, body, hdr := req(client, http.MethodGet, srv1.URL+"/v1/models", "", "")

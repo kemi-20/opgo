@@ -86,6 +86,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.apiAdmin(w, r)
 	case path == "/v1/usage" && r.Method == http.MethodGet:
 		p.serveUsage(w, r)
+	case path == "/v1/balance" && r.Method == http.MethodGet:
+		p.serveBalance(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/models"):
 		p.serveModels(w, r)
 	default:
@@ -93,9 +95,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveUsage 以官方一致格式返回套餐余量（数据来自服务端缓存快照，不携带任何 key）。
+// serveUsage 以官方一致格式返回当前 key 所属用户自己的套餐余量。
+// 字段名/结构与官方完全一致（status/percent/resetsAt），但 percent 是该用户
+// 在本窗口的已用百分比（个人用量除以个人限额，整数），resetsAt 对齐上游真重置
+// 时间；超限的窗口 status 为 exceeded。总池余量不在这里看（Web 页或
+// POST /api/usage 的 total）。响应不含任何 key。
 func (p *Proxy) serveUsage(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := p.authUser(r); !ok {
+	user, _, ok := p.authUser(r)
+	if !ok {
 		p.writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "无效的 key"})
 		return
 	}
@@ -104,20 +111,99 @@ func (p *Proxy) serveUsage(w http.ResponseWriter, r *http.Request) {
 		p.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "套餐余量尚未同步，请稍后再试"})
 		return
 	}
-	capJSON := func(c balance.CapInfo) map[string]any {
-		return map[string]any{
-			"status":   c.Status,
-			"percent":  c.Percent,
-			"resetsAt": c.ResetsAt.Format(time.RFC3339Nano),
+	now := time.Now()
+	c := p.cfg.Get()
+	rep := p.windowsReport(user.UUID, c.EffectiveLimits(user), snap, true, now)
+	usage := make(map[string]any, len(config.Periods))
+	for _, period := range config.Periods {
+		wi := rep[period.Name]
+		pct := 0
+		if wi.Limit > 0 {
+			pct = int(wi.Used/wi.Limit*100 + 0.5)
+			if pct < 0 {
+				pct = 0
+			}
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		status := "ok"
+		if wi.Limit > 0 && wi.Used >= wi.Limit {
+			status = "exceeded"
+		}
+		usage[poolKeyName(period.Name)] = map[string]any{
+			"status":   status,
+			"percent":  pct,
+			"resetsAt": snap.Cap(period.Name).ResetsAt.Format(time.RFC3339Nano),
 		}
 	}
+	p.writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+
+// serveBalance 以 DeepSeek 余额接口格式返回该用户 5h 窗口的额度，供 Kelivo
+// 等第三方客户端的余额栏直接读取：total_balance=5h总剩余(USD)，topped_up_balance=
+// 套餐限额内剩余，granted_balance=智能提额部分剩余（未提额时为 0；三者均为 5h
+// 窗口口径，且 total = topped_up + granted，余额栏认 total_balance 即可）。金额为
+// 保留 2 位小数的字符串（与 DeepSeek 一致）。响应不含任何 key。
+func (p *Proxy) serveBalance(w http.ResponseWriter, r *http.Request) {
+	user, _, ok := p.authUser(r)
+	if !ok {
+		p.writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "无效的 key"})
+		return
+	}
+	snap, synced := p.balance.Snapshot()
+	if !synced {
+		p.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "套餐余量尚未同步，请稍后再试"})
+		return
+	}
+	now := time.Now()
+	c := p.cfg.Get()
+	rep := p.windowsReport(user.UUID, c.EffectiveLimits(user), snap, true, now)
+	wi := rep["5h"]
+	effLimit := wi.Limit
+	if wi.Boosted && wi.BoostLimit > wi.Limit {
+		effLimit = wi.BoostLimit
+	}
+	// 套餐内剩余与提额部分剩余，两者相加即总剩余。
+	baseRem := 0.0
+	if wi.Limit > 0 {
+		baseRem = wi.Limit - wi.Used
+		if baseRem < 0 {
+			baseRem = 0
+		}
+	}
+	floor := wi.Used
+	if floor < wi.Limit {
+		floor = wi.Limit
+	}
+	boostRem := effLimit - floor
+	if boostRem < 0 {
+		boostRem = 0
+	}
+	total := baseRem + boostRem
 	p.writeJSON(w, http.StatusOK, map[string]any{
-		"usage": map[string]any{
-			"rolling": capJSON(snap.Rolling),
-			"weekly":  capJSON(snap.Weekly),
-			"monthly": capJSON(snap.Monthly),
+		"is_available": total > 0 && !snap.Rolling.Exceeded(),
+		"balance_infos": []any{
+			map[string]any{
+				"currency":          "USD",
+				"total_balance":     fmt.Sprintf("%.2f", total),
+				"granted_balance":   fmt.Sprintf("%.2f", boostRem),
+				"topped_up_balance": fmt.Sprintf("%.2f", baseRem),
+			},
 		},
 	})
+}
+
+// poolKeyName 计费窗口名对应总池键名（与官方 usage 的 rolling/weekly/monthly 对齐）。
+func poolKeyName(period string) string {
+	switch period {
+	case "1w":
+		return "weekly"
+	case "1m":
+		return "monthly"
+	default:
+		return "rolling"
+	}
 }
 
 func (p *Proxy) serveIndex(w http.ResponseWriter, r *http.Request) {

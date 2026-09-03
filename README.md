@@ -50,9 +50,10 @@ go build -o opgo.exe .
 - OpenAI SDK / openai-compatible：`baseURL: http://IP:3003/v1`，自动请求 `/v1/chat/completions`、`/v1/responses`
 - Anthropic SDK：`baseURL: http://IP:3003/v1`，自动请求 `/v1/messages`（x-api-key 填你的用户 key）
 - 模型列表：`GET http://IP:3003/v1/models`
-- 套餐余量（与上游官方格式一致）：`GET http://IP:3003/v1/usage`（Authorization: Bearer 你的用户 key）
+ - 套餐余量（官方格式，显示该用户自己的用量）：`GET http://IP:3003/v1/usage`（Authorization: Bearer 你的用户 key）
+ - 剩余额度（DeepSeek 格式，给 Kelivo 余额栏）：`GET http://IP:3003/v1/balance`（Authorization: Bearer 你的用户 key）；Kelivo 里路径填 `/balance`，字段填 `balance_infos.0.total_balance`（该用户 5h 总剩余，USD；`topped_up_balance`=套餐内剩余，`granted_balance`=提额部分剩余，未提额时为 0）
 
-代理会自动剥离 `/v1` 前缀并转发到上游对应端点；`/v1/models` 与 `/v1/usage` 由本地提供（配置与实时快照），不经过上游。
+代理会自动剥离 `/v1` 前缀并转发到上游对应端点；`/v1/models`、`/v1/usage` 与 `/v1/balance` 由本地提供（配置与实时快照），不经过上游。
 
 ## 配置说明
 
