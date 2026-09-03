@@ -630,6 +630,38 @@ func TestParseResponsesParallelToolCallsMerged(t *testing.T) {
 
 // TestConvertResponsesTopLevelToolItemsToCompletions 验证：转换后的 chat.completions
 // 请求包含完整的 tool_calls 与 tool 消息，且 arguments 不带多余引号。
+func TestConvertResponsesSummaryReasoningToCompletions(t *testing.T) {
+	// 原生 responses 的 reasoning 明文在 summary 数组（content 为空）；
+	// 转 completions 时必须落到 reasoning_content，不得丢失。
+	raw := []byte(`{"id":"resp_1","model":"gpt-5.6-luna","status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"opaque","content":[],"summary":[{"type":"summary_text","text":"thinking about sheep"}]},{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"9 sheep remain"}]}],"usage":{"input_tokens":28,"output_tokens":77,"total_tokens":105}}`)
+	out, err := ConvertResponse(FormatOpenAICompletions, FormatOpenAIResponses, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("转换结果不是合法 JSON: %v\n%s", err, out)
+	}
+	if len(obj.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1: %s", len(obj.Choices), out)
+	}
+	if got := obj.Choices[0].Message.ReasoningContent; got != "thinking about sheep" {
+		t.Fatalf("reasoning_content = %q, want 思考明文: %s", got, out)
+	}
+	if got := obj.Choices[0].Message.Content; got != "9 sheep remain" {
+		t.Fatalf("content = %q, want 正文: %s", got, out)
+	}
+}
+
+// TestConvertResponsesTopLevelToolItemsToCompletions 验证：转换后的 chat.completions
+// 请求包含完整的 tool_calls 与 tool 消息，且 arguments 不带多余引号。
 func TestConvertResponsesTopLevelToolItemsToCompletions(t *testing.T) {
 	raw := []byte(`{"model":"mimo-v2.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"command\":\"echo hello\"}"},{"type":"function_call_output","call_id":"call_1","output":"hello"}],"stream":true}`)
 	out, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAICompletions, raw)

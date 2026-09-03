@@ -116,6 +116,12 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 				Text        string `json:"text"`
 				Annotations []any  `json:"annotations"`
 			} `json:"content"`
+			// 原生 responses 的 reasoning 明文在 summary 数组（content 常为空）；
+			// 两者都读，避免 responses→completions 非流式转换丢思考内容。
+			Summary []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"summary"`
 			CallID    string          `json:"call_id"`
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -149,6 +155,13 @@ func parseOpenAIResponsesResponse(raw []byte) (*Response, error) {
 				// 部分实现（含上游回显）用 summary_text，两者都读。
 				if c.Type == "summary_text" || c.Type == "reasoning_text" {
 					reasoning.WriteString(c.Text)
+				}
+			}
+			for _, s := range o.Summary {
+				// 原生 responses 思考明文通常在 summary 数组（summary_text）；
+				// content 为空时这里是唯一来源，必须读，否则转 completions 会丢思考。
+				if s.Type == "summary_text" || s.Type == "reasoning_text" {
+					reasoning.WriteString(s.Text)
 				}
 			}
 		case "message":
